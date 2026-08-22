@@ -1,7 +1,7 @@
 {
   "name": "dsh-completion-gate",
-  "version": "0.1.1",
-  "description": "Evidence-backed production-readiness completion barrier with bounded premature-stop recovery for DeepSeek Harness.",
+  "version": "0.1.3",
+  "description": "Evidence-backed production-readiness completion barrier for DeepSeek Harness with persistent operator-configurable control center.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -9,11 +9,23 @@
     "./core": "./lib/core.js",
     "./runner": "./lib/runner.js",
     "./client": "./lib/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./settings": "./lib/settings.js"
   },
-  "files": ["lib", "src", "tests", "cordis.patch.yml", "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE"],
+  "files": [
+    "lib",
+    "src",
+    "tests",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "inject": [
@@ -26,10 +38,18 @@
     }
   },
   "scripts": {
-    "check": "node --check src/index.js && node --check src/core.js && node --check src/runner.js && node --check src/client.js && node --check lib/index.js && node --check lib/core.js && node --check lib/runner.js && node --check lib/client.js",
+    "check": "node --check src/index.js && node --check src/core.js && node --check src/runner.js && node --check src/settings.js && node --check src/client.js && node --check lib/index.js && node --check lib/core.js && node --check lib/runner.js && node --check lib/settings.js && node --check lib/client.js",
     "test": "node --test tests/*.test.mjs"
   },
-  "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "completion-gate", "production-readiness", "quality-gate", "agent"],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "completion-gate",
+    "production-readiness",
+    "quality-gate",
+    "agent"
+  ],
   "license": "MIT",
   "author": "AGSQ11"
 }

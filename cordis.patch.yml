@@ -18,3 +18,5 @@
         gateOnlyChangedWorkspaces: true
         commandTimeoutMs: 600000
         maxOutputChars: 12000
+        maxChangedFiles: 500
+        customChecks: []

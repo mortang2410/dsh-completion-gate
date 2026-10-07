@@ -156,7 +156,7 @@ Completion Gate can auto-detect and execute common project checks.
 | Composer / PHP | `composer test`, `composer lint` when scripts exist |
 | Any project | operator-defined custom checks |
 
-When `requireTests` is enabled, a project with **no executable test command detected** is reported as a missing harness. That condition alone is covered by a fresh passing verification (a full-scope recipe or a temporary verifier); a check that actually fails is never covered.
+When `requireTests` is enabled, a project with **no executable test command detected** is reported as a missing harness. That condition alone is covered by a fresh passing verification, whether it came from a recipe or the temporary verifier; a check that actually fails is never covered.
 
 Successful machine results are cached for the turn's change record. This avoids rerunning a ten-minute suite merely because the agent needs one extra turn to submit its final review.
 

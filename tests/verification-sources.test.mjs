@@ -44,7 +44,7 @@ function announce(svc, sessionId, turn, seq, files) {
 
 const file = (p) => ({ path: p, display: p, added: 1, deleted: 0 })
 
-test('a passing full-scope recipe covers the missing-harness condition', async t => {
+test('a passing verification covers the missing-harness condition whatever its scope', async t => {
   const cwd = tempDir(t)
   fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ name: 'probe', scripts: { start: 'node -e "setInterval(()=>{},1000)"' } }))
   const svc = service(t, { cwd, settings: { requireTests: true, requireAttestation: false, recipeReadinessTimeoutMs: 2000 } })
@@ -55,14 +55,24 @@ test('a passing full-scope recipe covers the missing-harness condition', async t
   assert.equal(before.pass, false)
   assert.match(before.blockers.join(' '), /No executable test command/)
 
-  // A parallel run over every phase with no start, which is a TARGETED receipt, is not enough.
+  // A phase subset records a TARGETED receipt. This subset holds no command, so the run is a
+  // failure, and a failed run never satisfies anything whatever its scope.
   const targeted = await svc.recipe(agentFor(cwd), { phases: ['build'] })
   assert.equal(targeted.run.scope, 'targeted')
-  assert.equal(targeted.report.pass, false, 'a targeted run must not satisfy a full-scope requirement')
+  assert.equal(targeted.run.pass, false)
+  assert.equal(targeted.report.pass, false, 'a failed run must not satisfy the requirement')
 
-  // A complete run records a full-scope pass, which covers the missing harness.
-  const full = await svc.recipe(agentFor(cwd), { phases: ['build', 'test'], skip_start: true })
-  assert.equal(full.run.scope, 'targeted')
+  // A passing TARGETED receipt covers the missing harness, because scope is recorded rather
+  // than gated. This is the regression test for the last-resort path: gating on full scope left
+  // the temporary verifier unable to clear the one blocker it exists to clear.
+  svc.ledger.clear('session-1')
+  svc.recordVerification(agentFor(cwd), await svc.turnChanges(agentFor(cwd)), { source: 'recipe', name: 'node', kind: 'node', scope: 'targeted', pass: true, output: 'ok' })
+  const targetedReport = await svc.run(agentFor(cwd), new AbortController().signal, { force: true })
+  assert.equal(targetedReport.verificationCoveredMissingHarness, true, 'a fresh passing targeted receipt covers the missing harness')
+  assert.equal(targetedReport.pass, true)
+
+  // A complete run records a full-scope pass, which covers the missing harness in the same way.
+  svc.ledger.clear('session-1')
   svc.recordVerification(agentFor(cwd), await svc.turnChanges(agentFor(cwd)), { source: 'recipe', name: 'node', kind: 'node', scope: 'full', pass: true, output: 'ok' })
   const report = await svc.run(agentFor(cwd), new AbortController().signal, { force: true })
   assert.equal(report.machinePass, false, 'the machine layer still computes the missing harness')
@@ -202,7 +212,8 @@ test('the temporary verifier records a targeted receipt and deletes a passing sc
   assert.equal(rows[0].source, 'temporary')
   assert.equal(rows[0].scope, 'targeted', 'a temporary script is never a full-scope pass')
   const report = await svc.run(agentFor(cwd), new AbortController().signal, { force: true })
-  assert.equal(report.verificationCoveredMissingHarness, false, 'targeted evidence does not satisfy a full-scope requirement')
+  assert.equal(report.verificationCoveredMissingHarness, true, 'a fresh passing temporary script clears the missing-harness blocker')
+  assert.equal(report.pass, true, 'the last-resort path is a real path to completion')
 })
 
 test('the temporary verifier refuses each invalid script path', async t => {

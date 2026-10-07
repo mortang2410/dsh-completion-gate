@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import{resolveConfig,scanTodos,scanSecurity,evaluateAttestation,normalizeAttestation}from'../src/core.js'
+import test from 'node:test';import assert from 'node:assert/strict';import{resolveConfig,scanTodos,scanSecurity,evaluateAttestation,normalizeAttestation}from'../lib/core.js'
 test('hotfix defaults are safe',()=>{const c=resolveConfig({});assert.equal(c.gateSubagents,false);assert.equal(c.preventPrematureStops,true);assert.equal(c.prematureStopMaxContinuations,3)})
 test('scanners work',()=>{assert.equal(scanTodos(['// TODO x']).length,1);assert.equal(scanSecurity(['const password = "123456789"']).length,1)})
 test('attestation is fingerprint bound',()=>{const a=normalizeAttestation({reviewed_files:['a'],review_summary:'reviewed',acceptance_criteria:[{criterion:'x',evidence:'test'}],unresolved_issues:[]},'fp');assert.equal(evaluateAttestation(a,['a'],'fp').pass,true);assert.equal(evaluateAttestation(a,['a'],'other').pass,false)})

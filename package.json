@@ -9,12 +9,16 @@
     "./core": "./lib/core.js",
     "./runner": "./lib/runner.js",
     "./client": "./lib/client.js",
+    "./changes": "./lib/changes.js",
+    "./ledger": "./lib/ledger.js",
+    "./recipe": "./lib/recipe.js",
+    "./recipe-runner": "./lib/recipe-runner.js",
+    "./verification": "./lib/verification.js",
     "./package.json": "./package.json",
     "./settings": "./lib/settings.js"
   },
   "files": [
     "lib",
-    "src",
     "tests",
     "cordis.patch.yml",
     "README.md",
@@ -38,7 +42,7 @@
     }
   },
   "scripts": {
-    "check": "node --check src/index.js && node --check src/core.js && node --check src/runner.js && node --check src/settings.js && node --check src/client.js && node --check lib/index.js && node --check lib/core.js && node --check lib/runner.js && node --check lib/settings.js && node --check lib/client.js",
+    "check": "node --check lib/index.js && node --check lib/core.js && node --check lib/runner.js && node --check lib/settings.js && node --check lib/client.js && node --check lib/changes.js && node --check lib/ledger.js && node --check lib/recipe.js && node --check lib/recipe-runner.js && node --check lib/verification.js",
     "test": "node --test tests/*.test.mjs"
   },
   "keywords": [

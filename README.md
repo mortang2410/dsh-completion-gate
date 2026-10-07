@@ -98,21 +98,49 @@ This is the recommended setting when using autonomous orchestration, Phoenix/mod
 
 You can explicitly enable subagent gating from the control center if a project really needs it.
 
-### 3. Workspace fingerprint
+### 3. Turn-scoped changed files
 
-Completion evidence is tied to a SHA-256 fingerprint of the current repository state.
+Completion evidence is tied to the turn's own change record, not to a fingerprint of the whole repository.
 
-The fingerprint accounts for:
+The changed-file list comes from the host's `@deepseek-ai/dsh-workspace-changes` recorder, which snapshots the working tree at turn start and turn end and diffs the two. That means:
 
-- session baseline Git HEAD;
-- commits created during the agent session;
-- staged changes;
-- unstaged changes;
-- untracked files.
+- a file that was already modified before your turn is part of the turn-start baseline and is **not** attributed to you, so unrelated work in the tree no longer blocks you;
+- a file written during the turn by any process inside the repository, including a shell command, **is** attributed to you;
+- gitignored build output is not attributed to you;
+- a file under the system temporary directory counts only when it lies inside the repository.
 
-This matters because a clean worktree does **not** prove the agent made no changes: the agent may already have committed them.
+When a turn changes nothing the recorder announces no summary, which is its normal silence. When the recorder is not mounted at all, or a record cannot be read, the gate reports that the changed files **cannot be determined** rather than assuming the workspace was unchanged.
 
-If the code changes after a successful check or attestation, the fingerprint changes and the old evidence is no longer valid.
+Evidence is keyed by the session, the turn and the record's sequence number, plus a digest of the recorded file list. Changing the code in a later turn therefore invalidates earlier evidence, while touching a file or writing build output does not.
+
+A turn whose every changed path is documentation or data runs no behavioral check and is not asked for a test command. The added-line TODO and credential scans still read its diff, and you must still attest to every changed file.
+
+### 3a. Verification sources
+
+One inventory decides where verification comes from, and the stop hook, the runner and the tool handler all read that same decision:
+
+| Source | When it applies |
+| --- | --- |
+| Canonical checks | A detected or operator-defined check exists. It always has authority and is never replaced. |
+| Recipe | No canonical check exists, but a recipe can bootstrap, build, test or boot the project. |
+| Temporary verifier | No canonical check and no usable recipe exist, and you ask for the last-resort probe. |
+| None | A documentation-only turn, which needs no behavioral verification. |
+
+A passing verification covers the missing-test-command condition only. It never clears the TODO scan, the credential scan, the changed-file review or the acceptance-criteria attestation, and it never excuses a check that actually failed.
+
+### 3b. The temporary verifier
+
+When nothing else exists, you write a small script and the gate runs it. The path must be absolute, lie under the system temporary directory, sit outside the repository, be a regular file, carry the `dsh-verify-` name prefix and stay under the size cap. The script runs directly with an argument vector and no shell, so an appended `|| true` cannot mask a failure. A path spelled under `/tmp` is also resolved through symlinks, so a link pointing back into the repository is refused.
+
+The gate fingerprints the project before and after the run and rejects the probe when anything differs. The fingerprint covers each file's contents, size, permission bits and modification time, each symlink's target, and the set of directories. Contents are hashed rather than size and time alone, because a rewrite of equal length with the timestamp restored would otherwise be invisible. It refuses the run outright when it cannot complete the comparison: more than 5000 entries, more than 64 MB, a file it cannot read, a directory it cannot list, or an entry it cannot describe. A refusal is a failure, never a silent pass. It kills the probe's whole process group before comparing, so a server or watcher the probe backgrounded cannot write afterwards.
+
+Stated ceilings: the contents of `node_modules`, a virtual environment, `__pycache__` and `.git` are not compared (they are not the code under test, and walking them would breach the entry bound on nearly every Node project), and neither is anything outside the project root. A child that creates its own process group or session escapes the teardown. A script that deliberately restores content, mode, timestamp and link targets together would defeat a before-and-after snapshot, which is beyond what that comparison can prove. A passing script is deleted; a failing one is left on disk so you can repair it. A passing run is recorded as a targeted receipt, which never satisfies a full-scope requirement.
+
+### 3c. Verification recipes
+
+For a project with no canonical test command, the gate can detect how to bootstrap, build, test and boot it, then poll a readiness URL and tear the process tree down. Detection covers Node (with the package manager chosen from the lockfile) and the conventional dev-server ports of Next.js, SvelteKit, Astro, Remix, Create React App and Vite, plus Python (Django, FastAPI/Uvicorn, Flask, generic), Go, Rust, Maven, Gradle, Makefile and Docker Compose.
+
+A saved recipe at `.dsh/environment.json` wins over detection and is never rewritten by it. A readiness poll accepts **any** HTTP status, including 404 and 500, because the process answered. A Compose recipe refuses to build or start when a read-only probe cannot rule out running containers for that project.
 
 ### 4. Machine evidence
 
@@ -128,9 +156,9 @@ Completion Gate can auto-detect and execute common project checks.
 | Composer / PHP | `composer test`, `composer lint` when scripts exist |
 | Any project | operator-defined custom checks |
 
-When `requireTests` is enabled, a project with **no executable test command detected** is considered blocked rather than silently treated as tested.
+When `requireTests` is enabled, a project with **no executable test command detected** is reported as a missing harness. That condition alone is covered by a fresh passing verification (a full-scope recipe or a temporary verifier); a check that actually fails is never covered.
 
-Successful machine results are cached for the exact workspace fingerprint. This avoids rerunning a ten-minute suite merely because the agent needs one extra turn to submit its final review.
+Successful machine results are cached for the turn's change record. This avoids rerunning a ten-minute suite merely because the agent needs one extra turn to submit its final review.
 
 ### 5. Added-code tripwires
 
@@ -156,7 +184,7 @@ This is a **regression tripwire**, not a replacement for dedicated SAST/security
 
 ### 6. Completion attestation
 
-Machine checks cannot prove every requirement. Before final completion, the agent can be required to call the `completion_gate` tool with an attestation bound to the current workspace fingerprint.
+Machine checks cannot prove every requirement. Before final completion, the agent can be required to call the `completion_gate` tool with an attestation bound to the turn's change record.
 
 Example:
 
@@ -189,7 +217,7 @@ In strict mode the gate verifies that:
 - at least one acceptance criterion is supplied;
 - every criterion has concrete evidence;
 - `unresolved_issues` is empty;
-- the attestation fingerprint still matches the repository.
+- the attestation still matches the turn's change record.
 
 ---
 
@@ -297,7 +325,7 @@ Discard cached machine evidence, attestation, and operator override for the acti
 
 ### `/gate-override <reason>`
 
-Explicit operator override for the **exact current workspace fingerprint**.
+Explicit operator override for the **exact current change record**.
 
 ```text
 /gate-override accepted temporary compatibility risk
@@ -367,6 +395,10 @@ The bundled profile patch starts with:
         commandTimeoutMs: 600000
         maxOutputChars: 12000
         maxChangedFiles: 500
+        autoDetectRecipe: true
+        allowTemporaryVerifier: true
+        recipeReadinessTimeoutMs: 60000
+        verificationNudgeLimit: 3
         customChecks: []
 ```
 
@@ -417,7 +449,7 @@ Model B continues same session
 Completion Gate still owns the same baseline and workspace evidence
 ```
 
-A replacement model can continue remediation without restarting the task. If the replacement changes code, the workspace fingerprint changes and stale gate evidence is invalidated naturally.
+A replacement model can continue remediation without restarting the task. If the replacement changes code, the change record changes and stale gate evidence is invalidated naturally.
 
 `gateSubagents: false` is recommended with autonomous failover/team orchestration so child jobs are not unnecessarily blocked by the root production-readiness policy.
 
@@ -458,7 +490,7 @@ The Premature Stop Guard and system-prompt instructions are intended to make the
 
 ### Tests are only as good as the project
 
-Passing tests do not prove correctness. The gate proves that configured checks passed for a specific repository fingerprint.
+Passing tests do not prove correctness. The gate proves that configured checks passed for a specific turn's change record.
 
 ### Attestation is structured model evidence
 

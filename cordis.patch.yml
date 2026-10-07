@@ -3,7 +3,7 @@
       name: dsh-completion-gate
       config:
         enabled: true
-        mode: strict
+        mode: advisory
         gateSubagents: false
         preventPrematureStops: true
         prematureStopMaxContinuations: 3

@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import{CompletionGateService,turnEvidence}from'../src/index.js'
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import{CompletionGateService,turnEvidence}from'../lib/index.js'
 function agent(events=[],header={cwd:process.cwd()}){const steers=[],followups=[];return{id:'a',session:{header,events},steer:m=>steers.push(m),followup:m=>followups.push(m),steers,followups}}
 const ctx={}
 

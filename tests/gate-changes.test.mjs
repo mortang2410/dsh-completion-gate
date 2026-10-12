@@ -247,3 +247,61 @@ test('a turn that changed nothing reports its stop result once the turn has ende
     assert.equal(attested.pass, true, `attest after the turn ended failed: ${JSON.stringify(attested.blockers)}`)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
+
+// A required check whose result depends on a file outside the change set. Its outcome changes
+// without any listed file changing, which is the environment-only fix this guards.
+function readyCheckRepo(t) {
+  const repo = tempRepo(t)
+  fs.writeFileSync(path.join(repo, 'check.js'), "process.exit(require('fs').existsSync('ready') ? 0 : 1)\n")
+  fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'probe', version: '1.0.0', scripts: { test: 'node check.js' } }, null, 2) + '\n')
+  fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 2\n')
+  return repo
+}
+
+function publishReady(svc, seq) {
+  svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 2 } })
+  svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 2 } })
+  svc.changeService().entries.set(`session-1:${seq}`, { turn: 2, cwd: svc.__repo, files: [file('app.js')], total: 1, added: 1, deleted: 0 })
+}
+
+test('a stop does not reuse a failing machine result, so an environment-only fix passes at the next stop', async t => {
+  const repo = readyCheckRepo(t)
+  const svc = service({ settings: { requireAttestation: false } })
+  svc.__repo = repo
+  try {
+    const agent = agentFor(repo)
+    const signal = new AbortController().signal
+    publishReady(svc, 40)
+    await svc.stopping({ agent, turn: 2, signal })
+    assert.equal(agent.steers.length, 1, 'stop 1 blocks on the failing required check')
+    assert.match(agent.steers[0].content[0].text, /failed\./)
+
+    // Environment only: an ignored file outside the change set. The listed bytes are unchanged.
+    fs.writeFileSync(path.join(repo, 'ready'), '')
+    publishReady(svc, 42)
+    await svc.stopping({ agent, turn: 2, signal })
+    assert.equal(agent.steers.length, 1, `stop 2 must recompute the check and pass: ${agent.steers.at(-1)?.content[0].text}`)
+    const report = svc.state(agent).lastReport
+    assert.equal(report.pass, true, `unexpected blockers: ${JSON.stringify(report.blockers)}`)
+    assert.equal(report.checks.find(check => check.category === 'test').pass, true)
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
+test('a stop does not reuse a failing result that attest cached for the same change set', async t => {
+  const repo = readyCheckRepo(t)
+  const svc = service({ settings: { requireAttestation: false } })
+  svc.__repo = repo
+  try {
+    const agent = agentFor(repo)
+    const signal = new AbortController().signal
+    publishReady(svc, 40)
+    const failed = await svc.attest(agent, { action: 'attest', reviewed_files: ['app.js'], review_summary: 'Reviewed app.js.', acceptance_criteria: [{ criterion: 'app.js sets value', evidence: 'app.js line 1' }], unresolved_issues: [] })
+    assert.equal(failed.pass, false, 'precondition: the required check fails')
+
+    fs.writeFileSync(path.join(repo, 'ready'), '')
+    publishReady(svc, 42)
+    await svc.stopping({ agent, turn: 2, signal })
+    assert.equal(agent.steers.length, 0, `a stop must not block on a result cached by attest: ${agent.steers.at(-1)?.content[0].text}`)
+    assert.equal(svc.state(agent).lastReport.pass, true)
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})

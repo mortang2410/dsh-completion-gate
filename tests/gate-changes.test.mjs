@@ -152,6 +152,28 @@ test('the added-line scans still read a documentation-only diff', () => {
   assert.equal(isDocumentationOnly([]), false, 'a turn with no changes is not exempt')
 })
 
+test('an in-turn check before the turn has any change record is undetermined and writes no ledger row', async t => {
+  const repo = tempRepo(t)
+  fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'probe', version: '1.0.0', scripts: { test: 'node -e "process.exit(0)"' } }) + '\n')
+  const svc = service()
+  try {
+    const agent = agentFor(repo)
+    // The turn has started but the recorder has announced nothing for it yet.
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
+
+    const report = await svc.run(agent, new AbortController().signal)
+    assert.equal(report.changesDetermined, false, 'an in-turn check with no record must not report the change set as determined')
+    assert.equal(report.pass, false)
+    assert.match(report.blockers.join(' '), /cannot be determined/)
+
+    // The recipe must actually run, so that a ledger write would have happened if one were made.
+    const outcome = await svc.recipe(agent, {})
+    assert.equal(outcome.ok, true, `the recipe did not run: ${JSON.stringify(outcome.blockers ?? outcome.problems)}`)
+    assert.equal(outcome.run.pass, true)
+    assert.deepEqual(svc.ledger.rowsFor('session-1'), [], 'an undetermined turn wrote a verification row')
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
 test('a turn keeps its attestation across repeated stops while its files and contents are unchanged', async t => {
   const repo = tempRepo(t)
   fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'probe', version: '1.0.0', scripts: { test: 'node -e "process.exit(0)"' } }) + '\n')

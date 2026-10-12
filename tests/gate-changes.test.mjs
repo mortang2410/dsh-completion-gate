@@ -214,3 +214,36 @@ test('a turn keeps its attestation across repeated stops while its files and con
     assert.match(agent.steers[1].content[0].text, /No completion attestation/)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
+
+test('a turn that changed nothing reports its stop result once the turn has ended', async t => {
+  const repo = tempRepo(t)
+  const svc = service({ settings: { requireAttestation: false, requireTests: false } })
+  try {
+    const agent = agentFor(repo)
+    const signal = new AbortController().signal
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
+
+    // Before the stop, the recorder has written nothing for this turn, so its change set is undetermined.
+    assert.equal((await svc.run(agent, signal)).changesDetermined, false)
+
+    // The stop passes a turn that changed nothing. The stop hook alone does not end the turn, because a
+    // steered stop continues the same turn number, so a call made now is still inside the turn.
+    await svc.stopping({ agent, turn: 1, signal })
+    assert.equal(agent.steers.length, 0, 'a turn that changed nothing passes its stop')
+    assert.equal((await svc.run(agent, signal)).changesDetermined, false)
+
+    // The host ends the turn after its stop. From here a missing record means the turn changed nothing.
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/end', data: { turn: 1 } })
+    const forced = await svc.run(agent, signal, { force: true })
+    assert.equal(forced.changesDetermined, true, `the stop result must hold after the turn ends: ${JSON.stringify(forced.blockers)}`)
+    assert.deepEqual(forced.changedFiles, [])
+    assert.equal(forced.pass, true, `unexpected blockers: ${JSON.stringify(forced.blockers)}`)
+
+    const attested = await svc.attest(agent, {
+      action: 'attest', reviewed_files: [], review_summary: 'No file changed.',
+      acceptance_criteria: [{ criterion: 'no change', evidence: 'no file changed' }], unresolved_issues: [],
+    })
+    assert.equal(attested.changesDetermined, true)
+    assert.equal(attested.pass, true, `attest after the turn ended failed: ${JSON.stringify(attested.blockers)}`)
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})

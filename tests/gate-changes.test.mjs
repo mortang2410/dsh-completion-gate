@@ -284,6 +284,32 @@ test('a change record with no changed files passes with "no changed files" under
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
+// Regression guard for the decided behavior (overseer decision (i)). The host writes no change record for
+// a turn that changed nothing, so after the turn has ended an absent record means no changes. This test
+// may pass before and after a change to the gate; it exists so that the stop check and /gate cannot drift
+// apart and so that the "not written yet" block cannot return after the turn ends.
+test('an ended turn with no change record reads as no changes: the stop check and /gate both pass, with no ledger row', async t => {
+  const repo = tempRepo(t)
+  const svc = service()
+  try {
+    const agent = agentFor(repo)
+    const signal = new AbortController().signal
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/end', data: { turn: 1 } })
+    // No workspace/changes event is observed for this turn: the recorder writes nothing for a turn that changed nothing.
+
+    await svc.stopping({ agent, turn: 1, signal })
+    assert.equal(agent.steers.length, 0, 'the stop check passes an ended turn with no change record')
+    assert.equal(svc.state(agent).lastReport.pass, true, `stop check: ${JSON.stringify(svc.state(agent).lastReport.blockers)}`)
+
+    const forced = await svc.run(agent, signal, { force: true })
+    assert.equal(forced.pass, true, `/gate must report the stop check's result: ${JSON.stringify(forced.blockers)}`)
+    assert.equal(forced.changesDetermined, true)
+    assert.doesNotMatch(forced.blockers.join(' '), /not been written yet/, 'an ended turn must not report its record as not yet written')
+    assert.deepEqual(svc.ledger.rowsFor('session-1'), [], 'a turn with no change record must not write a ledger row')
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
 test('a turn that changed nothing reports its stop result once the turn has ended', async t => {
   const repo = tempRepo(t)
   const svc = service({ settings: { requireAttestation: false, requireTests: false } })

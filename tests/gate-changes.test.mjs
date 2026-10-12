@@ -493,6 +493,58 @@ test('an unreadable nested HEAD blocks with the named message and passes once it
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
+// The first HEAD read of a nested repository fails, so no earlier HEAD stands in for it. An attest made in that
+// window must bind nothing: it is refused with the named block the stop check uses, and one attest after recovery passes.
+test('an attest during a first nested HEAD read failure binds nothing, and one attest after recovery passes', async t => {
+  const repo = tempRepo(t)
+  const child = path.join(repo, 'nested')
+  fs.mkdirSync(child)
+  git(child, ['init', '-q', '.'])
+  git(child, ['config', 'user.email', 'test@example.com'])
+  git(child, ['config', 'user.name', 'test'])
+  fs.writeFileSync(path.join(child, 'lib.js'), 'module.exports = 1\n')
+  git(child, ['add', '-A'])
+  git(child, ['commit', '-qm', 'child A'])
+
+  const headFile = path.join(child, '.git', 'HEAD')
+  const savedHead = fs.readFileSync(headFile, 'utf8')
+  // HEAD names a branch that does not exist, so the first-ever read of this path fails.
+  fs.writeFileSync(headFile, 'ref: refs/heads/missing-for-test\n')
+
+  const svc = service({ settings: { requireTests: false } })
+  try {
+    const agent = agentFor(repo)
+    const signal = new AbortController().signal
+    const publish = seq => {
+      svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 5 } })
+      svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 5 } })
+      svc.changeService().entries.set(`session-1:${seq}`, { turn: 5, cwd: repo, files: [file('nested')], total: 1, added: 1, deleted: 0 })
+    }
+    const named = /Nested repository nested: could not read nested HEAD; re-run \/gate\./
+    const attestation = {
+      action: 'attest', reviewed_files: ['nested'], review_summary: 'Reviewed the nested repository pointer.',
+      acceptance_criteria: [{ criterion: 'nested is at its reviewed commit', evidence: 'child HEAD at attestation' }], unresolved_issues: [],
+    }
+
+    publish(80)
+    const refused = await svc.attest(agent, attestation)
+    assert.equal(refused.pass, false, 'an attest during the failure window must not pass')
+    assert.match(refused.blockers.join(' '), named)
+    const stopCheck = await svc.run(agent, signal)
+    assert.deepEqual(refused.blockers, stopCheck.blockers, 'the refused attest must carry the same blockers as the stop check')
+    assert.equal(svc.state(agent).attestation, null, 'a refused attest must bind nothing to the placeholder identity')
+
+    fs.writeFileSync(headFile, savedHead)
+    publish(81)
+    const attested = await svc.attest(agent, attestation)
+    assert.equal(attested.pass, true, `one attest after recovery must pass: ${JSON.stringify(attested.blockers)}`)
+
+    publish(82)
+    await svc.stopping({ agent, turn: 5, signal })
+    assert.equal(agent.steers.length, 0, `the stop after that attest must pass: ${agent.steers.at(-1)?.content[0].text}`)
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
 // A nested repository under a directory whose name contains a newline. git prints the top-level path before
 // the HEAD commit, so the path must not be split on its newline, or the moved pointer is never seen.
 test('a moved nested pointer under a path containing a newline changes the attestation identity', async t => {

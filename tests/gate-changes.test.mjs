@@ -432,3 +432,63 @@ test('a stop does not reuse a failing result that attest cached for the same cha
     assert.equal(svc.state(agent).lastReport.pass, true)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
+
+// A nested repository whose HEAD cannot be read at one stop. The pointer does not move, so the gate must
+// block with the named message for that stop, and pass again once the HEAD reads. The unreadable read must
+// not replace the identity the path already had.
+test('an unreadable nested HEAD blocks with the named message and passes once it reads with the pointer unchanged', async t => {
+  const repo = tempRepo(t)
+  const child = path.join(repo, 'nested')
+  fs.mkdirSync(child)
+  git(child, ['init', '-q', '.'])
+  git(child, ['config', 'user.email', 'test@example.com'])
+  git(child, ['config', 'user.name', 'test'])
+  fs.writeFileSync(path.join(child, 'lib.js'), 'module.exports = 1\n')
+  git(child, ['add', '-A'])
+  git(child, ['commit', '-qm', 'child A'])
+
+  const svc = service({ settings: { requireTests: false } })
+  try {
+    const agent = agentFor(repo)
+    const signal = new AbortController().signal
+    const publish = seq => {
+      svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 5 } })
+      svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 5 } })
+      svc.changeService().entries.set(`session-1:${seq}`, { turn: 5, cwd: repo, files: [file('nested')], total: 1, added: 1, deleted: 0 })
+    }
+    const headFile = path.join(child, '.git', 'HEAD')
+    const savedHead = fs.readFileSync(headFile, 'utf8')
+    const named = /Nested repository nested: could not read nested HEAD; re-run \/gate\./
+
+    publish(60)
+    const attested = await svc.attest(agent, {
+      action: 'attest', reviewed_files: ['nested'], review_summary: 'Reviewed the nested repository pointer.',
+      acceptance_criteria: [{ criterion: 'nested is at its reviewed commit', evidence: 'child HEAD at attestation' }], unresolved_issues: [],
+    })
+    assert.equal(attested.pass, true, `attest failed: ${JSON.stringify(attested.blockers)}`)
+
+    // Stop 1: the child HEAD reads and the pointer is unchanged, so the stop passes.
+    publish(61)
+    await svc.stopping({ agent, turn: 5, signal })
+    assert.equal(agent.steers.length, 0, 'stop 1 passes at the attested commit')
+
+    // Stop 2: git cannot read the child HEAD, because HEAD names a branch that does not exist. The pointer did not move.
+    fs.writeFileSync(headFile, 'ref: refs/heads/missing-for-test\n')
+    publish(62)
+    await svc.stopping({ agent, turn: 5, signal })
+    assert.equal(agent.steers.length, 1, 'stop 2 blocks while the nested HEAD cannot be read')
+    assert.match(agent.steers[0].content[0].text, named)
+    assert.doesNotMatch(agent.steers[0].content[0].text, /No completion attestation/, 'an unreadable HEAD must not replace the identity of the path')
+
+    const during = await svc.run(agent, signal, { force: true })
+    assert.equal(during.pass, false, '/gate during the failure window must block')
+    assert.match(during.blockers.join(' '), named, '/gate names the same block during the failure window')
+
+    // Stop 3: the HEAD reads again at the same commit, so the stop passes.
+    fs.writeFileSync(headFile, savedHead)
+    publish(63)
+    await svc.stopping({ agent, turn: 5, signal })
+    assert.equal(agent.steers.length, 1, `stop 3 must pass once the nested HEAD reads again: ${agent.steers.at(-1)?.content[0].text}`)
+    assert.equal(svc.state(agent).lastReport.pass, true, `unexpected blockers: ${JSON.stringify(svc.state(agent).lastReport.blockers)}`)
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})

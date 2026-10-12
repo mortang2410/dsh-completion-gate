@@ -545,6 +545,40 @@ test('an attest during a first nested HEAD read failure binds nothing, and one a
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
+// A nested repository with no commit yet. Git cannot read its HEAD, and the block names that cause rather than the
+// generic read failure. The host does not list such a repository, so the test reaches the gate's own read directly.
+test('an unborn nested repository blocks with its own message, and the block clears once it has a commit', async t => {
+  const repo = tempRepo(t)
+  const child = path.join(repo, 'nested')
+  fs.mkdirSync(child)
+  git(child, ['init', '-q', '.'])
+  const svc = service({ settings: { requireTests: false } })
+  try {
+    const agent = agentFor(repo)
+    const signal = new AbortController().signal
+    const publish = seq => {
+      svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 6 } })
+      svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 6 } })
+      svc.changeService().entries.set(`session-1:${seq}`, { turn: 6, cwd: repo, files: [file('nested')], total: 1, added: 1, deleted: 0 })
+    }
+
+    publish(90)
+    const blocked = await svc.run(agent, signal)
+    assert.equal(blocked.pass, false, 'an unborn nested repository must block')
+    assert.match(blocked.blockers.join(' '), /Nested repository nested: nested repository has no commit; commit in it, then run \/gate again\./)
+    assert.doesNotMatch(blocked.blockers.join(' '), /could not read nested HEAD/, 'an unborn repository must not get the generic read message')
+
+    git(child, ['config', 'user.email', 'test@example.com'])
+    git(child, ['config', 'user.name', 'test'])
+    fs.writeFileSync(path.join(child, 'lib.js'), 'module.exports = 1\n')
+    git(child, ['add', '-A'])
+    git(child, ['commit', '-qm', 'child A'])
+    publish(91)
+    const committed = await svc.run(agent, signal)
+    assert.doesNotMatch(committed.blockers.join(' '), /has no commit|could not read nested HEAD/, `a committed nested repository must not block on its HEAD: ${JSON.stringify(committed.blockers)}`)
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
 // A nested repository under a directory whose name contains a newline. git prints the top-level path before
 // the HEAD commit, so the path must not be split on its newline, or the moved pointer is never seen.
 test('a moved nested pointer under a path containing a newline changes the attestation identity', async t => {

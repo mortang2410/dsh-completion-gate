@@ -215,6 +215,51 @@ test('a turn keeps its attestation across repeated stops while its files and con
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
+test('a moved nested repository pointer changes the attestation identity and an unmoved one keeps it', async t => {
+  const repo = tempRepo(t)
+  // A nested repository inside the workspace. The host lists it as a changed directory.
+  const child = path.join(repo, 'nested')
+  fs.mkdirSync(child)
+  git(child, ['init', '-q', '.'])
+  git(child, ['config', 'user.email', 'test@example.com'])
+  git(child, ['config', 'user.name', 'test'])
+  fs.writeFileSync(path.join(child, 'lib.js'), 'module.exports = 1\n')
+  git(child, ['add', '-A'])
+  git(child, ['commit', '-qm', 'child A'])
+
+  const svc = service({ settings: { requireTests: false } })
+  try {
+    const agent = agentFor(repo)
+    const signal = new AbortController().signal
+    const publish = seq => {
+      svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 5 } })
+      svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 5 } })
+      svc.changeService().entries.set(`session-1:${seq}`, { turn: 5, cwd: repo, files: [file('nested')], total: 1, added: 1, deleted: 0 })
+    }
+
+    publish(60)
+    const attested = await svc.attest(agent, {
+      action: 'attest', reviewed_files: ['nested'], review_summary: 'Reviewed the nested repository pointer.',
+      acceptance_criteria: [{ criterion: 'nested is at its reviewed commit', evidence: 'child HEAD at attestation' }], unresolved_issues: [],
+    })
+    assert.equal(attested.pass, true, `attest failed: ${JSON.stringify(attested.blockers)}`)
+
+    // No move: the same child commit keeps the attestation valid at the next stop.
+    publish(61)
+    await svc.stopping({ agent, turn: 5, signal })
+    assert.equal(agent.steers.length, 0, 'an unmoved nested repository must keep its attestation')
+
+    // The child's HEAD moves after attestation, in the same turn.
+    fs.writeFileSync(path.join(child, 'lib.js'), 'module.exports = 2\n')
+    git(child, ['add', '-A'])
+    git(child, ['commit', '-qm', 'child B'])
+    publish(63)
+    await svc.stopping({ agent, turn: 5, signal })
+    assert.equal(agent.steers.length, 1, 'a moved nested repository pointer must invalidate the attestation')
+    assert.match(agent.steers[0].content[0].text, /No completion attestation/)
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
 test('a turn that changed nothing reports its stop result once the turn has ended', async t => {
   const repo = tempRepo(t)
   const svc = service({ settings: { requireAttestation: false, requireTests: false } })

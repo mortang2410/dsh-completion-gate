@@ -248,6 +248,38 @@ test('a turn that changed nothing reports its stop result once the turn has ende
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
+test('a stop after a transient diff read failure rescans the same bytes and blocks on a new TODO', async t => {
+  const repo = tempRepo(t)
+  fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 2\n// TODO: remove debug\n')
+  const changes = recorder()
+  // The diff read fails once, at stop 1 only. Every later read succeeds.
+  let failures = 1
+  changes.diff = async () => {
+    if (failures > 0) { failures -= 1; throw new Error('transient read failure') }
+    return { kind: 'text', hunks: [{ lines: ['-const value = 1', '+const value = 2', '+// TODO: remove debug'] }] }
+  }
+  const svc = service({ workspaceChanges: changes, settings: { requireAttestation: false, requireTests: false } })
+  try {
+    const agent = agentFor(repo)
+    const signal = new AbortController().signal
+    const publish = seq => {
+      svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 4 } })
+      svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 4 } })
+      changes.entries.set(`session-1:${seq}`, { turn: 4, cwd: repo, files: [file('app.js')], total: 1, added: 1, deleted: 0 })
+    }
+
+    publish(50)
+    await svc.stopping({ agent, turn: 4, signal })
+    assert.equal(svc.state(agent).lastReport.diffGaps.length, 1, 'precondition: stop 1 recorded the failed diff read')
+
+    // Same bytes, same listed file. The diff now reads, so the new TODO must be found.
+    publish(52)
+    await svc.stopping({ agent, turn: 4, signal })
+    assert.equal(agent.steers.length, 1, `stop 2 must rescan the same bytes and block on the TODO: ${agent.steers.at(-1)?.content[0].text}`)
+    assert.match(agent.steers[0].content[0].text, /TODO\/FIXME/)
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
 // A required check whose result depends on a file outside the change set. Its outcome changes
 // without any listed file changing, which is the environment-only fix this guards.
 function readyCheckRepo(t) {

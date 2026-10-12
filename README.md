@@ -158,7 +158,7 @@ Completion Gate can auto-detect and execute common project checks.
 
 When `requireTests` is enabled, a project with **no executable test command detected** is reported as a missing harness. That condition alone is covered by a fresh passing verification, whether it came from a recipe or the temporary verifier; a check that actually fails is never covered.
 
-Successful machine results are cached for the turn's change record. A failing result is not reused by a later stop, so a fix that changes only the environment is seen at the next stop. This avoids rerunning a ten-minute suite merely because the agent needs one extra turn to submit its final review.
+Successful machine results are cached for the turn's change record. A failing result, or one whose diff read had a gap, is not reused by a later stop, so a fix that changes only the environment is seen at the next stop. This avoids rerunning a ten-minute suite merely because the agent needs one extra turn to submit its final review.
 
 ### 5. Added-code tripwires
 

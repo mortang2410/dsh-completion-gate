@@ -80,6 +80,27 @@ test('empty recovery turn is retried with another bounded follow-up',async()=>{
  assert.match(a.followups[1].content[0].text,/returned no useful assistant content/)
 })
 
+test('an out-of-range port is refused before any phase runs or any probe is sent', async () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cg-port-')))
+  const s = service(ctx, {})
+  try {
+    // The start command writes a marker, so the marker exists only if the start phase ran.
+    const marker = path.join(dir, 'started')
+    fs.mkdirSync(path.join(dir, '.dsh'))
+    const start = `node -e "require('fs').writeFileSync('${marker}','x')"`
+    fs.writeFileSync(path.join(dir, '.dsh', 'environment.json'), JSON.stringify({ version: 1, recipe: { name: 'port-check', kind: 'node', start, port: 8000 } }))
+    for (const port of [70000, -1, 3000.5, 0]) {
+      const outcome = await s.recipe(agent([], { cwd: dir }), { port })
+      assert.equal(outcome.ok, false, `port ${port} was accepted`)
+      assert.match(outcome.blockers.join(' '), /port must be an integer from 1 to 65535/, `port ${port} was refused without a port reason`)
+      assert.equal(fs.existsSync(marker), false, `port ${port} launched the start command before it was refused`)
+    }
+  } finally {
+    cleanupService(s)
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('normal recovery response clears the continuation chain',()=>{
  const s=service(ctx,{prematureStopMaxContinuations:3})
  const a=agent([{type:'assistant/message',data:{turn:1,message:{content:[{type:'text',text:'Next I will inspect it.'}]}}}])

@@ -610,14 +610,33 @@ test('a /gate before any turn has completed is undetermined, not a pass', async 
     const fresh = await svc.run(agent, signal, { force: true })
     assert.equal(fresh.changesDetermined, false, 'a fresh session has no completed turn to read')
     assert.equal(fresh.pass, false, `a /gate with no completed turn must not pass: ${JSON.stringify(fresh.blockers)}`)
-    assert.match(reportMarkdown(fresh), /no completed turn in this session/)
+    assert.match(reportMarkdown(fresh), /no completed turn observed since the gate started/)
 
     // A turn that has started but not completed is the same case for an explicit /gate.
     svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
     const open = await svc.run(agent, signal, { force: true })
     assert.equal(open.pass, false, `a /gate inside the first turn must not pass: ${JSON.stringify(open.blockers)}`)
-    assert.match(reportMarkdown(open), /no completed turn in this session/)
+    assert.match(reportMarkdown(open), /no completed turn observed since the gate started/)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
+// A host restart starts the gate with an empty tracker, and the host never publishes a session's earlier events to the
+// hook. An explicit /gate after a restart is undetermined until one turn completes, and says so (ACCEPT-H4).
+test('after a restart, an explicit /gate says no completed turn was observed since the gate started', async t => {
+  const repo = tempRepo(t)
+  const before = service()
+  const after = service()
+  try {
+    before.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
+    before.changes.observe({ id: 'session-1' }, { type: 'turn/end', data: { turn: 1 } })
+    const report = await after.run(agentFor(repo), new AbortController().signal, { force: true })
+    assert.equal(report.changesDetermined, false)
+    assert.equal(report.pass, false, `a /gate after a restart must not pass: ${JSON.stringify(report.blockers)}`)
+    assert.match(report.blockers.join(' '), /no completed turn observed since the gate started/)
+  } finally {
+    fs.rmSync(before.__testSettingsDir, { recursive: true, force: true })
+    fs.rmSync(after.__testSettingsDir, { recursive: true, force: true })
+  }
 })
 
 // An absent record after the turn has ended passes, as the stop check does. The output must state that basis

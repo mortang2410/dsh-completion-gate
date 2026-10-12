@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { CompletionGateService } from '../lib/index.js'
 import { reportMarkdown } from '../lib/core.js'
-import { isDocumentationOnly, isDocumentationPath } from '../lib/changes.js'
+import { contentKey, isDocumentationOnly, isDocumentationPath } from '../lib/changes.js'
 
 // These tests drive the real service, so they fail if the gate goes back to a source that
 // cannot separate the user's pre-existing uncommitted work from a change this session made.
@@ -490,6 +490,60 @@ test('an unreadable nested HEAD blocks with the named message and passes once it
     await svc.stopping({ agent, turn: 5, signal })
     assert.equal(agent.steers.length, 1, `stop 3 must pass once the nested HEAD reads again: ${agent.steers.at(-1)?.content[0].text}`)
     assert.equal(svc.state(agent).lastReport.pass, true, `unexpected blockers: ${JSON.stringify(svc.state(agent).lastReport.blockers)}`)
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
+// A nested repository under a directory whose name contains a newline. git prints the top-level path before
+// the HEAD commit, so the path must not be split on its newline, or the moved pointer is never seen.
+test('a moved nested pointer under a path containing a newline changes the attestation identity', async t => {
+  const repo = tempRepo(t)
+  const listed = 'odd\ndir/nested'
+  const child = path.join(repo, 'odd\ndir', 'nested')
+  fs.mkdirSync(child, { recursive: true })
+  git(child, ['init', '-q', '.'])
+  git(child, ['config', 'user.email', 'test@example.com'])
+  git(child, ['config', 'user.name', 'test'])
+  fs.writeFileSync(path.join(child, 'lib.js'), 'module.exports = 1\n')
+  git(child, ['add', '-A'])
+  git(child, ['commit', '-qm', 'child A'])
+  const headA = git(child, ['rev-parse', 'HEAD']).trim()
+
+  // The identity of the listed directory is its child's HEAD, even under a newline path.
+  assert.equal(await contentKey(repo, listed), `head:${headA}`, 'a nested pointer under a newline path is keyed by its HEAD')
+
+  const svc = service({ settings: { requireTests: false } })
+  try {
+    const agent = agentFor(repo)
+    const signal = new AbortController().signal
+    const publish = seq => {
+      svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 6 } })
+      svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 6 } })
+      svc.changeService().entries.set(`session-1:${seq}`, { turn: 6, cwd: repo, files: [file(listed)], total: 1, added: 1, deleted: 0 })
+    }
+
+    publish(70)
+    const attested = await svc.attest(agent, {
+      action: 'attest', reviewed_files: [listed], review_summary: 'Reviewed the nested repository pointer.',
+      acceptance_criteria: [{ criterion: 'nested is at its reviewed commit', evidence: 'child HEAD at attestation' }], unresolved_issues: [],
+    })
+    assert.equal(attested.pass, true, `attest failed: ${JSON.stringify(attested.blockers)}`)
+    publish(71)
+    await svc.stopping({ agent, turn: 6, signal })
+    assert.equal(agent.steers.length, 0, 'precondition: the unmoved pointer passes')
+
+    // The child's HEAD moves after attestation, in the same turn.
+    fs.writeFileSync(path.join(child, 'lib.js'), 'module.exports = 2\n')
+    git(child, ['add', '-A'])
+    git(child, ['commit', '-qm', 'child B'])
+    assert.notEqual(await contentKey(repo, listed), `head:${headA}`, 'the moved pointer changes the key')
+    publish(73)
+    await svc.stopping({ agent, turn: 6, signal })
+    assert.equal(agent.steers.length, 1, 'a moved pointer under a newline path must block the next stop')
+    assert.match(agent.steers[0].content[0].text, /No completion attestation/)
+
+    const forced = await svc.run(agent, signal, { force: true })
+    assert.equal(forced.pass, false, '/gate must block a moved pointer under a newline path')
+    assert.match(forced.blockers.join(' '), /No completion attestation/)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 

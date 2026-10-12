@@ -43,9 +43,20 @@ function recorder(entries = new Map()) {
 
 function service({ workspaceChanges = recorder(), settings = {} } = {}) {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cg-gate-settings-')))
-  const ctx = { reflect: { get: name => (name === 'workspaceChanges' ? workspaceChanges : undefined) } }
+  // The gate starts against a stub host, so tests can publish turn events through its session/event hook.
+  const listeners = new Map()
+  const off = () => () => {}
+  const ctx = {
+    reflect: { get: name => (name === 'workspaceChanges' ? workspaceChanges : undefined) },
+    on: (name, listener) => { listeners.set(name, listener); return off() },
+    provide: off, tools: { register: off }, commands: { register: off }, systemPrompt: { section: off }, webServer: { register: off },
+  }
   const instance = new CompletionGateService(ctx, settings, { settingsPath: path.join(dir, 'settings.json') })
   instance.__testSettingsDir = dir
+  instance.start()
+  let published = 0
+  // Publish one event the way dsh-session does: the session first, then { type, seq, time, data }.
+  instance.publish = (agent, type, data) => listeners.get('session/event')({ id: agent.id }, { type, seq: ++published, time: Date.now(), data })
   return instance
 }
 
@@ -683,9 +694,10 @@ test('a PASS from an absent record states its basis and never claims a verified 
 
     // A turn that called a tool and produced no announced change.
     const toolAgent = agentFor(repo, 'session-1')
-    toolAgent.session.events.push({ type: 'tool/call', data: { turn: 1 } }, { type: 'tool/result', data: { turn: 1 } })
-    svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
-    svc.changes.observe({ id: 'session-1' }, { type: 'turn/end', data: { turn: 1 } })
+    svc.publish(toolAgent, 'turn/start', { turn: 1 })
+    svc.publish(toolAgent, 'tool/call', { turn: 1, callId: 'c1', name: 'bash', arguments: {} })
+    svc.publish(toolAgent, 'tool/result', { turn: 1, callId: 'c1' })
+    svc.publish(toolAgent, 'turn/end', { turn: 1 })
     const tool = await svc.run(toolAgent, signal, { force: true })
     const toolText = reportMarkdown(tool)
     assert.equal(tool.pass, true, `a turn with no announced change passes: ${JSON.stringify(tool.blockers)}`)
@@ -695,9 +707,9 @@ test('a PASS from an absent record states its basis and never claims a verified 
 
     // A text-only turn: the host never inspects it, so the output names that.
     const textAgent = agentFor(repo, 'session-2')
-    textAgent.session.events.push({ type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'Done.' }] } } })
-    svc.changes.observe({ id: 'session-2' }, { type: 'turn/start', data: { turn: 1 } })
-    svc.changes.observe({ id: 'session-2' }, { type: 'turn/end', data: { turn: 1 } })
+    svc.publish(textAgent, 'turn/start', { turn: 1 })
+    svc.publish(textAgent, 'assistant/message', { turn: 1, message: { content: [{ type: 'text', text: 'Done.' }] } })
+    svc.publish(textAgent, 'turn/end', { turn: 1 })
     const text = await svc.run(textAgent, signal, { force: true })
     const textText = reportMarkdown(text)
     assert.equal(text.pass, true, `a text-only turn with no record passes: ${JSON.stringify(text.blockers)}`)
@@ -707,30 +719,28 @@ test('a PASS from an absent record states its basis and never claims a verified 
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-// The live session exposes its log through snapshotEvents(), not through an events array. The text-only check
-// must read the log there, so a text-only turn is named in production as well as in the test fakes.
-test('the text-only check reads the live session log through snapshotEvents', async t => {
+// The text-only check reads the turn's events from the session/event hook. A turn whose start the hook saw, with no
+// tool call, is named text-only. A turn whose start the hook never saw (the host does not publish seed events) is
+// named neither, because nothing shows that it was text-only.
+test('the text-only check reads the turn events the hook saw, and names neither basis when the turn start is missing', async t => {
   const repo = tempRepo(t)
   const svc = service()
   try {
     const signal = new AbortController().signal
-    const textLog = [{ type: 'assistant/message', seq: 0, data: { turn: 1, message: { content: [{ type: 'text', text: 'Done.' }] } } }]
     const textAgent = agentFor(repo, 'session-3')
-    textAgent.session = { header: { cwd: repo }, snapshotEvents: () => textLog }
-    svc.changes.observe({ id: 'session-3' }, { type: 'turn/start', data: { turn: 1 } })
-    svc.changes.observe({ id: 'session-3' }, { type: 'turn/end', data: { turn: 1 } })
+    svc.publish(textAgent, 'turn/start', { turn: 1 })
+    svc.publish(textAgent, 'assistant/message', { turn: 1, message: { content: [{ type: 'text', text: 'Done.' }] } })
+    svc.publish(textAgent, 'turn/end', { turn: 1 })
     const text = await svc.run(textAgent, signal, { force: true })
     assert.equal(text.pass, true, `a text-only turn with no record passes: ${JSON.stringify(text.blockers)}`)
     assert.match(reportMarkdown(text), /text-only turn, not inspected/)
 
-    // The same log with a tool call in the turn: the record is absent for another reason, so it is not text-only.
-    const toolLog = [...textLog, { type: 'tool/call', seq: 1, data: { turn: 2, callId: 'c1' } }]
-    const toolAgent = agentFor(repo, 'session-4')
-    toolAgent.session = { header: { cwd: repo }, snapshotEvents: () => toolLog }
-    svc.changes.observe({ id: 'session-4' }, { type: 'turn/start', data: { turn: 2 } })
-    svc.changes.observe({ id: 'session-4' }, { type: 'turn/end', data: { turn: 2 } })
-    const tool = await svc.run(toolAgent, signal, { force: true })
-    assert.equal(tool.notice, 'no host change record for this turn')
-    assert.doesNotMatch(reportMarkdown(tool), /text-only/)
+    const unseenAgent = agentFor(repo, 'session-4')
+    svc.publish(unseenAgent, 'assistant/message', { turn: 2, message: { content: [{ type: 'text', text: 'Done.' }] } })
+    svc.publish(unseenAgent, 'turn/end', { turn: 2 })
+    const unseen = await svc.run(unseenAgent, signal, { force: true, turn: 2 })
+    assert.equal(unseen.pass, true, `a turn with no record passes: ${JSON.stringify(unseen.blockers)}`)
+    assert.equal(unseen.notice, 'no host change record for this turn')
+    assert.doesNotMatch(reportMarkdown(unseen), /text-only/)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })

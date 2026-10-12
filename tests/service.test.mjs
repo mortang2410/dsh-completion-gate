@@ -1,28 +1,37 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import{CompletionGateService,turnEvidence}from'../lib/index.js'
-function agent(events=[],header={cwd:process.cwd()}){const steers=[],followups=[];return{id:'a',session:{header,events},steer:m=>steers.push(m),followup:m=>followups.push(m),steers,followups}}
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import{fileURLToPath}from'node:url';import{CompletionGateService}from'../lib/index.js'
+// The first argument is kept for existing call sites and ignored: turn events reach the gate through the session/event hook.
+function agent(_events=[],header={cwd:process.cwd()}){const steers=[],followups=[];return{id:'a',session:{header},steer:m=>steers.push(m),followup:m=>followups.push(m),steers,followups}}
 const ctx={}
 
 function service(ctx,config={}){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cg-service-settings-'));const instance=new CompletionGateService(ctx,config,{settingsPath:path.join(dir,'settings.json')});instance.__testSettingsDir=dir;return instance}
 function cleanupService(instance){if(instance?.__testSettingsDir)fs.rmSync(instance.__testSettingsDir,{recursive:true,force:true})}
-test('matches screenshot-style pending action',()=>{const a=agent([{type:'assistant/message',data:{turn:1,message:{content:[{type:'text',text:'Now I need the call site, and in parallel start the Exa research.'}]}}},{type:'tool/call',data:{turn:1}},{type:'tool/result',data:{turn:1}}]);assert.equal(turnEvidence(a,1).futureIntent,true)})
-test('does not mistake let me know for pending work',()=>{const a=agent([{type:'assistant/message',data:{turn:1,message:{content:[{type:'text',text:'Everything is complete. Let me know if you want changes.'}]}}}]);assert.equal(turnEvidence(a,1).futureIntent,false)})
-test('reasoning-only after tools is unfinished',()=>{const a=agent([{type:'tool/call',data:{turn:2}},{type:'tool/result',data:{turn:2}},{type:'assistant/message',data:{turn:2,message:{content:[{type:'reasoning',text:'Huge finding. I should inspect next.'}]}}}]);assert.equal(turnEvidence(a,2).reasoningOnlyAfterTools,true)})
-test('guard is bounded across a recovery chain',()=>{const s=service(ctx,{prematureStopMaxContinuations:2});const a=agent([{type:'assistant/message',data:{turn:3,message:{content:[{type:'text',text:'Next I will inspect the call site.'}]}}}]);assert.ok(s.premature(a,3));a.session.events=[{type:'assistant/message',data:{turn:4,message:{content:[{type:'text',text:'I still need to trace the caller.'}]}}}];assert.ok(s.premature(a,4));a.session.events=[{type:'assistant/message',data:{turn:5,message:{content:[{type:'text',text:'Next I will inspect the route.'}]}}}];assert.equal(s.premature(a,5),null)})
+
+// The gate started against a stub host. Turn events are published through its session/event hook, the way dsh-session
+// publishes them: the session first, then { type, seq, time, data }.
+let published=0
+function liveService(config={}){const listeners=new Map();const off=()=>()=>{};const host={reflect:{get:()=>undefined},on:(name,listener)=>{listeners.set(name,listener);return off()},provide:off,tools:{register:off},commands:{register:off},systemPrompt:{section:off},webServer:{register:off}};const svc=service(host,config);svc.__listeners=listeners;svc.start();return svc}
+function emit(svc,agentRef,type,data){svc.__listeners.get('session/event')({id:agentRef.id},{type,seq:++published,time:Date.now(),data})}
+
+test('matches screenshot-style pending action',()=>{const svc=liveService();const a=agent();emit(svc,a,'assistant/message',{turn:1,message:{content:[{type:'text',text:'Now I need the call site, and in parallel start the Exa research.'}]}});emit(svc,a,'tool/call',{turn:1});emit(svc,a,'tool/result',{turn:1});const p=svc.premature(a,1);assert.ok(p,'the guard must fire on pending text');assert.equal(p.futureIntent,true)})
+test('does not mistake let me know for pending work',()=>{const svc=liveService();const a=agent();emit(svc,a,'assistant/message',{turn:1,message:{content:[{type:'text',text:'Everything is complete. Let me know if you want changes.'}]}});assert.equal(svc.premature(a,1),null)})
+test('reasoning-only after tools is unfinished',()=>{const svc=liveService();const a=agent();emit(svc,a,'tool/call',{turn:2});emit(svc,a,'tool/result',{turn:2});emit(svc,a,'assistant/message',{turn:2,message:{content:[{type:'reasoning',text:'Huge finding. I should inspect next.'}]}});const p=svc.premature(a,2);assert.ok(p,'the guard must fire on reasoning-only output after tools');assert.equal(p.reasoningOnlyAfterTools,true)})
+test('guard is bounded across a recovery chain',()=>{const svc=liveService({prematureStopMaxContinuations:2});const a=agent();emit(svc,a,'assistant/message',{turn:3,message:{content:[{type:'text',text:'Next I will inspect the call site.'}]}});assert.ok(svc.premature(a,3));emit(svc,a,'assistant/message',{turn:4,message:{content:[{type:'text',text:'I still need to trace the caller.'}]}});assert.ok(svc.premature(a,4));emit(svc,a,'assistant/message',{turn:5,message:{content:[{type:'text',text:'Next I will inspect the route.'}]}});assert.equal(svc.premature(a,5),null)})
+test('the guard reads the session/event hook, never a session event array',()=>{const svc=liveService();const a=agent();a.session.events=[{type:'assistant/message',data:{turn:1,message:{content:[{type:'text',text:'Next I will inspect it.'}]}}}];assert.equal(svc.premature(a,1),null)})
+test('no file under lib reads session events through snapshotEvents or session.events',()=>{const lib=fileURLToPath(new URL('../lib/',import.meta.url));for(const name of fs.readdirSync(lib)){if(!name.endsWith('.js'))continue;const text=fs.readFileSync(path.join(lib,name),'utf8');assert.doesNotMatch(text,/snapshotEvents/,`${name} reads the session log through snapshotEvents`);assert.doesNotMatch(text,/session\.events/,`${name} reads session.events`)}})
 test('subagents are skipped by default',()=>{const s=service(ctx,{});const a=agent([],{cwd:process.cwd(),parentSession:'parent',delegationDepth:1});assert.equal(s.applies(a),false)})
 test('root agents are gated',()=>{const s=service(ctx,{});assert.equal(s.applies(agent()),true)})
 
 test('turn-stopping schedules a fresh follow-up for screenshot-style unfinished root turn',async()=>{
- const a=agent([
-  {type:'assistant/message',data:{turn:11,message:{content:[{type:'text',text:'Now I need the call site to see where each value comes from, and in parallel start the Exa research you asked for.'}]}}},
-  {type:'tool/call',data:{turn:11,name:'grep'}},
-  {type:'tool/result',data:{turn:11}},
-  {type:'assistant/message',data:{turn:11,message:{content:[{type:'reasoning',text:'HUGE finding from the Exa research.'}]}}}
- ])
- const s=service(ctx,{autoDetectChecks:false,requireTests:false})
- await s.stopping({agent:a,turn:11,signal:new AbortController().signal})
- assert.equal(a.steers.length,0)
- assert.equal(a.followups.length,1)
- assert.match(a.followups[0].content[0].text,/PREMATURE STOP RECOVERY/)
+ const svc=liveService({autoDetectChecks:false,requireTests:false});const a=agent();
+ emit(svc,a,'turn/start',{turn:11});
+ emit(svc,a,'assistant/message',{turn:11,message:{content:[{type:'text',text:'Now I need the call site to see where each value comes from, and in parallel start the Exa research you asked for.'}]}});
+ emit(svc,a,'tool/call',{turn:11,name:'grep'});
+ emit(svc,a,'tool/result',{turn:11});
+ emit(svc,a,'assistant/message',{turn:11,message:{content:[{type:'reasoning',text:'HUGE finding from the Exa research.'}]}});
+ await svc.stopping({agent:a,turn:11,signal:new AbortController().signal});
+ assert.equal(a.steers.length,0);
+ assert.equal(a.followups.length,1);
+ assert.match(a.followups[0].content[0].text,/PREMATURE STOP RECOVERY/);
 })
 
 test('turn-stopping leaves subagent lifecycle untouched by default',async()=>{
@@ -70,12 +79,13 @@ test('settings API saves live policy and reset endpoint restores profile default
 
 
 test('empty recovery turn is retried with another bounded follow-up',async()=>{
- const s=service(ctx,{autoDetectChecks:false,requireTests:false,prematureStopMaxContinuations:3})
- const a=agent([{type:'assistant/message',data:{turn:1,message:{content:[{type:'text',text:'Now I need to inspect the call site.'}]}}}])
- await s.stopping({agent:a,turn:1,signal:new AbortController().signal})
+ const svc=liveService({autoDetectChecks:false,requireTests:false,prematureStopMaxContinuations:3})
+ const a=agent()
+ emit(svc,a,'assistant/message',{turn:1,message:{content:[{type:'text',text:'Now I need to inspect the call site.'}]}})
+ await svc.stopping({agent:a,turn:1,signal:new AbortController().signal})
  assert.equal(a.followups.length,1)
- a.session.events=[{type:'assistant/message',data:{turn:2,message:{content:[]}}}]
- await s.stopping({agent:a,turn:2,signal:new AbortController().signal})
+ emit(svc,a,'assistant/message',{turn:2,message:{content:[]}})
+ await svc.stopping({agent:a,turn:2,signal:new AbortController().signal})
  assert.equal(a.followups.length,2)
  assert.match(a.followups[1].content[0].text,/returned no useful assistant content/)
 })
@@ -102,11 +112,12 @@ test('an out-of-range port is refused before any phase runs or any probe is sent
 })
 
 test('normal recovery response clears the continuation chain',()=>{
- const s=service(ctx,{prematureStopMaxContinuations:3})
- const a=agent([{type:'assistant/message',data:{turn:1,message:{content:[{type:'text',text:'Next I will inspect it.'}]}}}])
- assert.ok(s.premature(a,1))
- a.session.events=[{type:'assistant/message',data:{turn:2,message:{content:[{type:'text',text:'Investigation complete. The defect is fixed and verified.'}]}}}]
- assert.equal(s.premature(a,2),null)
- assert.equal(s.state(a).continuationBlocks,0)
- assert.equal(s.state(a).recoveryPending,false)
+ const svc=liveService({prematureStopMaxContinuations:3})
+ const a=agent()
+ emit(svc,a,'assistant/message',{turn:1,message:{content:[{type:'text',text:'Next I will inspect it.'}]}})
+ assert.ok(svc.premature(a,1))
+ emit(svc,a,'assistant/message',{turn:2,message:{content:[{type:'text',text:'Investigation complete. The defect is fixed and verified.'}]}})
+ assert.equal(svc.premature(a,2),null)
+ assert.equal(svc.state(a).continuationBlocks,0)
+ assert.equal(svc.state(a).recoveryPending,false)
 })

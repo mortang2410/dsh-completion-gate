@@ -601,3 +601,31 @@ test('a PASS from an absent record states its basis and never claims a verified 
     assert.doesNotMatch(textText, /verified|no changed files/)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
+
+// The live session exposes its log through snapshotEvents(), not through an events array. The text-only check
+// must read the log there, so a text-only turn is named in production as well as in the test fakes.
+test('the text-only check reads the live session log through snapshotEvents', async t => {
+  const repo = tempRepo(t)
+  const svc = service()
+  try {
+    const signal = new AbortController().signal
+    const textLog = [{ type: 'assistant/message', seq: 0, data: { turn: 1, message: { content: [{ type: 'text', text: 'Done.' }] } } }]
+    const textAgent = agentFor(repo, 'session-3')
+    textAgent.session = { header: { cwd: repo }, snapshotEvents: () => textLog }
+    svc.changes.observe({ id: 'session-3' }, { type: 'turn/start', data: { turn: 1 } })
+    svc.changes.observe({ id: 'session-3' }, { type: 'turn/end', data: { turn: 1 } })
+    const text = await svc.run(textAgent, signal, { force: true })
+    assert.equal(text.pass, true, `a text-only turn with no record passes: ${JSON.stringify(text.blockers)}`)
+    assert.match(reportMarkdown(text), /text-only turn, not inspected/)
+
+    // The same log with a tool call in the turn: the record is absent for another reason, so it is not text-only.
+    const toolLog = [...textLog, { type: 'tool/call', seq: 1, data: { turn: 2, callId: 'c1' } }]
+    const toolAgent = agentFor(repo, 'session-4')
+    toolAgent.session = { header: { cwd: repo }, snapshotEvents: () => toolLog }
+    svc.changes.observe({ id: 'session-4' }, { type: 'turn/start', data: { turn: 2 } })
+    svc.changes.observe({ id: 'session-4' }, { type: 'turn/end', data: { turn: 2 } })
+    const tool = await svc.run(toolAgent, signal, { force: true })
+    assert.equal(tool.notice, 'no host change record for this turn')
+    assert.doesNotMatch(reportMarkdown(tool), /text-only/)
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})

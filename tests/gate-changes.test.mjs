@@ -513,3 +513,37 @@ test('a /gate before any turn has completed is undetermined, not a pass', async 
     assert.match(reportMarkdown(open), /no completed turn in this session/)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
+
+// An absent record after the turn has ended passes, as the stop check does. The output must state that basis
+// and must never say the turn was verified or that no change was verified.
+test('a PASS from an absent record states its basis and never claims a verified no-change result', async t => {
+  const repo = tempRepo(t)
+  const svc = service()
+  try {
+    const signal = new AbortController().signal
+
+    // A turn that called a tool and produced no announced change.
+    const toolAgent = agentFor(repo, 'session-1')
+    toolAgent.session.events.push({ type: 'tool/call', data: { turn: 1 } }, { type: 'tool/result', data: { turn: 1 } })
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/end', data: { turn: 1 } })
+    const tool = await svc.run(toolAgent, signal, { force: true })
+    const toolText = reportMarkdown(tool)
+    assert.equal(tool.pass, true, `a turn with no announced change passes: ${JSON.stringify(tool.blockers)}`)
+    assert.equal(tool.notice, 'no host change record for this turn')
+    assert.match(toolText, /no host change record for this turn/)
+    assert.doesNotMatch(toolText, /verified|no changed files|text-only/)
+
+    // A text-only turn: the host never inspects it, so the output names that.
+    const textAgent = agentFor(repo, 'session-2')
+    textAgent.session.events.push({ type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'Done.' }] } } })
+    svc.changes.observe({ id: 'session-2' }, { type: 'turn/start', data: { turn: 1 } })
+    svc.changes.observe({ id: 'session-2' }, { type: 'turn/end', data: { turn: 1 } })
+    const text = await svc.run(textAgent, signal, { force: true })
+    const textText = reportMarkdown(text)
+    assert.equal(text.pass, true, `a text-only turn with no record passes: ${JSON.stringify(text.blockers)}`)
+    assert.match(textText, /text-only turn, not inspected/)
+    assert.match(textText, /no host change record for this turn/)
+    assert.doesNotMatch(textText, /verified|no changed files/)
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})

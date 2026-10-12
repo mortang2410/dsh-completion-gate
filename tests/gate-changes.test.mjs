@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { CompletionGateService } from '../lib/index.js'
+import { reportMarkdown } from '../lib/core.js'
 import { isDocumentationOnly, isDocumentationPath } from '../lib/changes.js'
 
 // These tests drive the real service, so they fail if the gate goes back to a source that
@@ -257,6 +258,29 @@ test('a moved nested repository pointer changes the attestation identity and an 
     await svc.stopping({ agent, turn: 5, signal })
     assert.equal(agent.steers.length, 1, 'a moved nested repository pointer must invalidate the attestation')
     assert.match(agent.steers[0].content[0].text, /No completion attestation/)
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
+test('a change record with no changed files passes with "no changed files" under the default config', async t => {
+  const repo = tempRepo(t)
+  const svc = service()
+  try {
+    const agent = agentFor(repo)
+    const signal = new AbortController().signal
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
+    svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq: 70, data: { turn: 1 } })
+    svc.changeService().entries.set('session-1:70', { turn: 1, cwd: repo, files: [], total: 0, added: 0, deleted: 0 })
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/end', data: { turn: 1 } })
+
+    // The operator's /gate is a forced run. It must report the same result as the stop check.
+    await svc.stopping({ agent, turn: 1, signal })
+    assert.equal(agent.steers.length, 0, 'the stop check passes a turn with no changed files')
+
+    const report = await svc.run(agent, signal, { force: true })
+    assert.equal(report.changesDetermined, true)
+    assert.equal(report.pass, true, `a turn with no changed files must pass: ${JSON.stringify(report.blockers)}`)
+    assert.equal(report.notice, 'no changed files')
+    assert.match(reportMarkdown(report), /no changed files/)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 

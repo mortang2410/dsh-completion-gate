@@ -111,7 +111,9 @@ The changed-file list comes from the host's `@deepseek-ai/dsh-workspace-changes`
 
 When a turn changes nothing the recorder announces no summary, which is its normal silence. When the recorder is not mounted at all, or a record cannot be read, the gate reports that the changed files **cannot be determined** rather than assuming the workspace was unchanged.
 
-Evidence is keyed by the session, the turn, and a digest of the recorded file list together with each listed file's current contents. The record's sequence number is not part of the key, so a later stop that records the same files with the same contents keeps earlier evidence valid. Editing a listed file, or changing which files are listed, invalidates it. Touching a file without changing its bytes does not, and writing ignored build output does not, because the recorder does not list it.
+A missing record is not always an error. Once a turn has ended, a missing record reads as **no host change record for this turn**, and the stop passes on that basis. The host writes no record silently in several cases: when a turn changes nothing, when recording fails, when the turn-start baseline fails, and when the turn has no tool result. The gate cannot tell those cases apart. An explicit `/gate` that runs before any turn has completed, with no record for the turn, reports the change set as **cannot be determined**.
+
+Evidence is keyed by the session, the turn, and a digest of the recorded file list together with each listed file's current contents. A listed directory is a nested repository or submodule. It is keyed by its committed HEAD, not by the files inside it, so an uncommitted edit inside it does not change the key and a new commit does. A directory that is not its own repository root has a fixed key. If a nested HEAD cannot be read, the gate blocks and names that path until the HEAD reads again. The record's sequence number is not part of the key, so a later stop that records the same files with the same contents keeps earlier evidence valid. Editing a listed file, or changing which files are listed, invalidates it. Touching a file without changing its bytes does not, and writing ignored build output does not, because the recorder does not list it.
 
 A turn whose every changed path is documentation or data runs no behavioral check and is not asked for a test command. The added-line TODO and credential scans still read its diff, and you must still attest to every changed file.
 
@@ -505,6 +507,12 @@ The built-in scanner catches obvious newly added risky patterns. It is not a com
 A custom check is operator-controlled code execution on the DSH host. Treat it with the same care as adding a command to a CI configuration.
 
 ---
+
+### Accepted limits of the changed-file source
+
+- **A missing record is not proof of no change.** After a turn ends, the gate reads a missing host record as no changes. The host writes no record when a turn changes nothing, and also when recording fails, when the turn-start baseline fails, or when the turn has no tool result, so a changed file can be missed in those cases. The gate cannot tell these apart (`@deepseek-ai/dsh-workspace-changes`, `lib/index.js` lines 844 and 896; `lib/changes.js` `readTurnChanges`).
+- **A text-only turn is not inspected.** A turn with no tool call produces no host record, so a file written outside the tools in that turn is not listed. The gate names such a turn "text-only turn, not inspected" in its report, which needs the session's own tool-call events (`lib/index.js` `turnChanges`, the `textOnly` check).
+- **A nested edit that leaves its HEAD unchanged is invisible.** The host leaves files inside a nested repository out of its listing, so an uncommitted edit inside one is never listed and never changes the key. Only a moved HEAD is seen (`@deepseek-ai/dsh-workspace-changes`, `lib/index.js` lines 884 and 885, with gitlink paths from line 405). The gate does not scan nested repositories itself.
 
 ## Recommended configuration for an autonomous developer team
 

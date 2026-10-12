@@ -68,7 +68,7 @@ Completion Gate inspects the latest turn for strong evidence that the model itse
 - `Next I will run...`
 - `I still need to...`
 - `Let me trace...`
-- `...and in parallel...`
+- `...and in parallel start the lint run...`
 - reasoning-only output after tool work with no user-facing completion
 
 When detected, the plugin queues a waking `agent.followup()` for a fresh turn such as:
@@ -515,6 +515,7 @@ A custom check is operator-controlled code execution on the DSH host. Treat it w
 - **A nested edit that leaves its HEAD unchanged is invisible.** The host leaves files inside a nested repository out of its listing, so an uncommitted edit inside one is never listed and never changes the key. Only a moved HEAD is seen (`@deepseek-ai/dsh-workspace-changes`, `lib/index.js` lines 884 and 885, with gitlink paths from line 405). The gate does not scan nested repositories itself.
 - **A non-forced check can pass with no record (ACCEPT-H3).** Before any turn of the session has started, a non-forced check (`/gate-status`, or `completion_gate` with action `status`) with no record for the turn reads the change set as none and passes. A turn that has ended with no record is also read as none. An open turn with no record is undetermined for a non-forced check and an explicit `/gate`, but the stop-time check passes it. An explicit `/gate` with no record before any completed turn is undetermined.
 - **After a host restart, an explicit `/gate` is undetermined until one turn completes (ACCEPT-H4).** The gate keeps its turn record in memory, and the host does not publish a session's earlier events to the gate's hook. After a restart, an explicit `/gate`, `completion_gate` run, recipe or temporary verifier run reports the change set as undetermined until one new turn completes, even when earlier turns completed. The stop check still works for each new turn. A non-forced check after a restart, before the next turn starts, reads no changes and passes. The premature-stop guard and the text-only check read only the turn events published after the gate started, so a turn that began before a restart is judged on its later events alone.
+- **Reasoning is not read when the final message has text (ACCEPT-H5).** After tool work, reasoning such as "Now I need to inspect the call site." followed by final text "Here is the status so far." passes, because the guard judges only the text. This follows the reasoning rule in the Premature Stop Guard section.
 
 ## Recommended configuration for an autonomous developer team
 

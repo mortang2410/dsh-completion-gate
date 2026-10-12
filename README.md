@@ -111,7 +111,7 @@ The changed-file list comes from the host's `@deepseek-ai/dsh-workspace-changes`
 
 When a turn changes nothing the recorder announces no summary, which is its normal silence. When the recorder is not mounted at all, or a record cannot be read, the gate reports that the changed files **cannot be determined** rather than assuming the workspace was unchanged.
 
-Evidence is keyed by the session, the turn and the record's sequence number, plus a digest of the recorded file list. Changing the code in a later turn therefore invalidates earlier evidence, while touching a file or writing build output does not.
+Evidence is keyed by the session, the turn, and a digest of the recorded file list together with each listed file's current contents. The record's sequence number is not part of the key, so a later stop that records the same files with the same contents keeps earlier evidence valid. Editing a listed file, or changing which files are listed, invalidates it. Touching a file without changing its bytes does not, and writing ignored build output does not, because the recorder does not list it.
 
 A turn whose every changed path is documentation or data runs no behavioral check and is not asked for a test command. The added-line TODO and credential scans still read its diff, and you must still attest to every changed file.
 

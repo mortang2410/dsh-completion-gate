@@ -151,3 +151,44 @@ test('the added-line scans still read a documentation-only diff', () => {
   assert.equal(isDocumentationPath('licence'), true)
   assert.equal(isDocumentationOnly([]), false, 'a turn with no changes is not exempt')
 })
+
+test('a turn keeps its attestation across repeated stops while its files and contents are unchanged', async t => {
+  const repo = tempRepo(t)
+  fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'probe', version: '1.0.0', scripts: { test: 'node -e "process.exit(0)"' } }) + '\n')
+  fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 2\n')
+  const svc = service()
+  try {
+    const agent = agentFor(repo)
+    const signal = new AbortController().signal
+    // Each call is one `workspace/changes` announcement, as a stop produces it, for the same file.
+    const publish = seq => {
+      svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 3 } })
+      svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 3 } })
+      svc.changeService().entries.set(`session-1:${seq}`, { turn: 3, cwd: repo, files: [file('app.js')], total: 1, added: 1, deleted: 0 })
+    }
+    const attestation = {
+      action: 'attest', reviewed_files: ['app.js'], review_summary: 'Reviewed app.js.',
+      acceptance_criteria: [{ criterion: 'app.js sets value', evidence: 'app.js line 1' }], unresolved_issues: [],
+    }
+
+    publish(305)
+    await svc.stopping({ agent, turn: 3, signal })
+    assert.equal(agent.steers.length, 1, 'stop 1 blocks until the change set is attested')
+    assert.match(agent.steers[0].content[0].text, /No completion attestation/)
+
+    const attested = await svc.attest(agent, attestation)
+    assert.equal(attested.pass, true, `attest failed: ${JSON.stringify(attested.blockers)}`)
+
+    publish(307)
+    await svc.stopping({ agent, turn: 3, signal })
+    assert.equal(agent.steers.length, 1, 'a repeated stop over an unchanged change set must not block again')
+    assert.equal(svc.state(agent).lastReport.pass, true)
+    assert.equal(svc.state(agent).lastReport.recordSeq, 307, 'the report names the record it was computed from')
+
+    fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 3\n')
+    publish(309)
+    await svc.stopping({ agent, turn: 3, signal })
+    assert.equal(agent.steers.length, 2, 'an edited file must invalidate the attestation')
+    assert.match(agent.steers[1].content[0].text, /No completion attestation/)
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})

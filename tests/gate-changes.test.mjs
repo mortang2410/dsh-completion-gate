@@ -492,3 +492,24 @@ test('an unreadable nested HEAD blocks with the named message and passes once it
     assert.equal(svc.state(agent).lastReport.pass, true, `unexpected blockers: ${JSON.stringify(svc.state(agent).lastReport.blockers)}`)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
+
+// Before any turn of the session has completed, nothing is known about its changes. An explicit /gate must
+// fail closed, not report "no changed files" at HEAD.
+test('a /gate before any turn has completed is undetermined, not a pass', async t => {
+  const repo = tempRepo(t)
+  const svc = service()
+  try {
+    const agent = agentFor(repo)
+    const signal = new AbortController().signal
+    const fresh = await svc.run(agent, signal, { force: true })
+    assert.equal(fresh.changesDetermined, false, 'a fresh session has no completed turn to read')
+    assert.equal(fresh.pass, false, `a /gate with no completed turn must not pass: ${JSON.stringify(fresh.blockers)}`)
+    assert.match(reportMarkdown(fresh), /no completed turn in this session/)
+
+    // A turn that has started but not completed is the same case for an explicit /gate.
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
+    const open = await svc.run(agent, signal, { force: true })
+    assert.equal(open.pass, false, `a /gate inside the first turn must not pass: ${JSON.stringify(open.blockers)}`)
+    assert.match(reportMarkdown(open), /no completed turn in this session/)
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})

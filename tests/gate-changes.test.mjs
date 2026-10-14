@@ -186,6 +186,100 @@ test('an in-turn check before the turn has any change record is undetermined and
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
+// A verification run is recorded against the workspace as it stood BEFORE the run. A recipe or a
+// probe that rewrites a listed file moves the evidence fingerprint, so its row can never satisfy
+// the gate. A command's own rewrite is not evidence for the bytes it wrote, so the row earns no
+// coverage (fail closed), and the blocker names the stale verification instead of a missing command.
+test('a passing recipe that rewrites a listed file does not cover the missing-harness blocker', async t => {
+  const repo = tempRepo(t)
+  fs.mkdirSync(path.join(repo, '.dsh'))
+  fs.writeFileSync(path.join(repo, '.dsh', 'environment.json'), JSON.stringify({
+    version: 1,
+    recipe: { name: 'rewrites-a-listed-file', kind: 'node', test: [`node -e "require('fs').writeFileSync('app.js','rewritten by the recipe\\n')"`] },
+  }) + '\n')
+  const svc = service()
+  try {
+    const agent = agentFor(repo)
+    announce(svc, 'session-1', 1, 401, [file('app.js')])
+    svc.changeService().entries.set('session-1:401', { turn: 1, cwd: repo, files: [file('app.js')], total: 1, added: 1, deleted: 0 })
+
+    const before = await svc.turnChanges(agent, null, { explicit: true })
+    assert.equal(before.determined, true, 'precondition: the change set is determined before the recipe runs')
+    const outcome = await svc.recipe(agent, {})
+    assert.equal(outcome.ok, true, `the recipe did not run: ${JSON.stringify(outcome.blockers ?? outcome.problems)}`)
+    assert.equal(outcome.run.pass, true, `the recipe phase did not pass: ${JSON.stringify(outcome.run.reason ?? outcome.run.phases)}`)
+    assert.equal(fs.readFileSync(path.join(repo, 'app.js'), 'utf8'), 'rewritten by the recipe\n', 'precondition: the recipe must actually rewrite the listed file')
+    assert.notEqual(before.fingerprint, outcome.report.fingerprint, 'precondition: the rewrite moved the workspace fingerprint')
+
+    const rows = svc.ledger.rowsFor('session-1')
+    assert.equal(rows.length, 1, 'a passing recipe must record exactly one verification row')
+    assert.equal(rows[0].pass, true)
+    assert.equal(rows[0].fingerprint, before.fingerprint, 'the row must be keyed to the workspace as it stood before the recipe rewrote the listed file')
+    assert.equal(outcome.report.verificationCoveredMissingHarness, false, `a row keyed to the pre-run bytes must not cover the missing-harness condition: ${JSON.stringify(outcome.report.blockers)}`)
+    assert.doesNotMatch(outcome.report.blockers.join(' '), /No executable test command was detected/, 'the stale pass must not be reported as a missing test command')
+    assert.match(outcome.report.blockers.join(' '), /A verification ran and passed but the workspace changed afterwards.*recipe "rewrites-a-listed-file"/, 'the blocker must name the stale verification')
+    assert.match(outcome.report.blockers.join(' '), /No completion attestation exists/, 'the attestation requirement is independent of the recipe')
+    assert.equal(outcome.report.pass, false, 'a missing attestation still blocks the turn')
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
+// The same shape in the sibling caller: a temporary probe that is itself part of the turn's change
+// record is deleted after it passes, so the workspace moves away from the row recorded before the
+// deletion. That row is keyed to the pre-run bytes and earns no coverage (fail closed).
+test('a passing temporary verifier that is itself a changed file does not cover the missing-harness blocker', async t => {
+  const repo = tempRepo(t)
+  const script = path.resolve(os.tmpdir(), `dsh-verify-probe-${process.pid}-${Date.now()}.js`)
+  fs.writeFileSync(script, 'process.exit(0)\n', { mode: 0o755 })
+  t.after(() => { try { fs.rmSync(script, { force: true }) } catch {} })
+  const svc = service()
+  try {
+    const agent = agentFor(repo)
+    const listed = [file('app.js'), file(script)]
+    announce(svc, 'session-1', 1, 403, listed)
+    svc.changeService().entries.set('session-1:403', { turn: 1, cwd: repo, files: listed, total: listed.length, added: listed.length, deleted: 0 })
+
+    const before = await svc.turnChanges(agent, null, { explicit: true })
+    assert.equal(before.determined, true, 'precondition: the change set is determined before the probe runs')
+    const outcome = await svc.temporaryVerify(agent, { script_path: script, runtime: 'node' })
+    assert.equal(outcome.ok, true, `the probe was refused: ${JSON.stringify(outcome.blockers)}`)
+    assert.equal(outcome.run.pass, true, `the probe did not pass: ${JSON.stringify(outcome.run.detail)}`)
+    assert.equal(fs.existsSync(script), false, 'precondition: a passing probe is deleted, which moves the workspace fingerprint')
+    assert.notEqual(before.fingerprint, outcome.report.fingerprint, 'precondition: the deletion moved the workspace fingerprint')
+
+    const rows = svc.ledger.rowsFor('session-1')
+    assert.equal(rows.length, 1, 'a passing probe must record exactly one verification row')
+    assert.equal(rows[0].pass, true)
+    assert.equal(rows[0].fingerprint, before.fingerprint, 'the row must be keyed to the workspace as it stood before the probe was deleted')
+    assert.equal(outcome.report.verificationCoveredMissingHarness, false, `a row keyed to the pre-run bytes must not cover the missing-harness condition: ${JSON.stringify(outcome.report.blockers)}`)
+    assert.doesNotMatch(outcome.report.blockers.join(' '), /No executable test command was detected/, 'the stale pass must not be reported as a missing test command')
+    assert.match(outcome.report.blockers.join(' '), /A verification ran and passed but the workspace changed afterwards.*temporary "dsh-verify-probe-/, 'the blocker must name the stale probe')
+    assert.match(outcome.report.blockers.join(' '), /No completion attestation exists/, 'the attestation requirement is independent of the probe')
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
+test('a recipe that rewrites a listed file reports its stale verification by name, not as a missing test command', async t => {
+  const repo = tempRepo(t)
+  fs.mkdirSync(path.join(repo, '.dsh'))
+  fs.writeFileSync(path.join(repo, '.dsh', 'environment.json'), JSON.stringify({
+    version: 1,
+    recipe: { name: 'rewrites-a-listed-file', kind: 'node', test: [`node -e "require('fs').writeFileSync('app.js','rewritten by the recipe\\n')"`] },
+  }) + '\n')
+  const svc = service()
+  try {
+    const agent = agentFor(repo)
+    announce(svc, 'session-1', 1, 402, [file('app.js')])
+    svc.changeService().entries.set('session-1:402', { turn: 1, cwd: repo, files: [file('app.js')], total: 1, added: 1, deleted: 0 })
+
+    const outcome = await svc.recipe(agent, {})
+    assert.equal(outcome.run.pass, true, `the recipe phase did not pass: ${JSON.stringify(outcome.run.reason ?? outcome.run.phases)}`)
+    // The exact wording and order: the stale verification is named, and the attestation blocker is unchanged.
+    assert.deepEqual(outcome.report.blockers, [
+      'A verification ran and passed but the workspace changed afterwards, so it does not cover the current files: recipe "rewrites-a-listed-file". Re-run it on the current tree.',
+      'No completion attestation exists for the current workspace state.',
+    ])
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
 test('a turn keeps its attestation across repeated stops while its files and contents are unchanged', async t => {
   const repo = tempRepo(t)
   fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'probe', version: '1.0.0', scripts: { test: 'node -e "process.exit(0)"' } }) + '\n')

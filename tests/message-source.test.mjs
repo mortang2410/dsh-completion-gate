@@ -73,7 +73,6 @@ function announce(svc, sessionId, turn, seq, files) {
 function assertProducerOwned(message, where) {
   assert.ok(message, `${where}: no message was emitted`)
   assert.equal(typeof message.source, 'object', `${where}: the message carries no source object`)
-  assert.notEqual(message.source.kind, REFUSED_KIND, `${where}: the bare 'plugin' kind is refused by the host`)
   assert.equal(message.source.kind, PRODUCER_KIND, `${where}: expected the producer-owned kind ${PRODUCER_KIND}`)
 }
 
@@ -106,9 +105,42 @@ test('the blocked-stop steer carries the producer-owned source kind', async t =>
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
+// The strict-mode error steer is the one emitter no other behavioural test reaches: the follow-up
+// and the blocked-stop steer each have a test above, and this branch runs only when the evaluator
+// itself throws. An empty session cwd is such a failure, raised by the gate's own root(), so the
+// catch branch is exercised by a real error rather than by a stubbed run().
+test('the strict-mode evaluation-error steer carries the producer-owned source kind', async t => {
+  const svc = service({ settings: { mode: 'strict' } })
+  try {
+    const agent = agentFor('')
+    await svc.stopping({ agent, turn: 4, signal: new AbortController().signal })
+    assert.equal(agent.steers.length, 1, 'a strict-mode evaluation failure must produce exactly one steer')
+    const text = agent.steers[0].content.map(part => part.text).join('')
+    assert.match(text, /could not evaluate the workspace/, 'the steer must be the evaluation-error notice, not the blocked-stop notice')
+    assert.match(text, /requires session\.header\.cwd/, 'the steer must name the evaluator failure it hit')
+    assertProducerOwned(agent.steers[0], 'agent.steer')
+    assert.equal('plugin' in agent.steers[0].source, false, 'the retired V3 plugin field must not ride along')
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
+// The control for the test above: the same failure under advisory mode steers no one, so the steer
+// it asserts can only come from the strict branch of that catch block.
+test('an advisory-mode evaluation error steers no one', async t => {
+  const svc = service({ settings: { mode: 'advisory' } })
+  try {
+    const agent = agentFor('')
+    await svc.stopping({ agent, turn: 4, signal: new AbortController().signal })
+    assert.equal(agent.steers.length, 0, 'advisory mode must not steer on an evaluation failure')
+    assert.equal(agent.followups.length, 0, 'an evaluation failure is not a premature stop, so it produces no follow-up')
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
 test('every message emitter in lib/index.js uses the one producer-owned source', () => {
   const file = fileURLToPath(new URL('../lib/index.js', import.meta.url))
   const text = fs.readFileSync(file, 'utf8')
+  // The pinned expectation is itself worth pinning: if PRODUCER_KIND were ever set to the bare
+  // refused kind, every equality assertion in this file would agree with a source the host drops.
+  assert.notEqual(PRODUCER_KIND, REFUSED_KIND, 'the pinned producer kind must not be the bare kind the host refuses')
   const declared = /const SOURCE = Object\.freeze\(\{ kind: '([^']+)'/.exec(text)
   assert.ok(declared, 'lib/index.js declares no frozen SOURCE constant')
   assert.equal(declared[1], PRODUCER_KIND, `SOURCE declares the kind ${declared[1]}, which the host refuses or does not expect`)

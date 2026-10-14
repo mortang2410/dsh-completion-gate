@@ -8,6 +8,7 @@
 - Make the premature-stop continuation cap span the recovery chain across turns.
 - Retry a bounded empty recovery turn instead of silently stopping immediately.
 - Update Control Center wording and README to describe follow-up recovery semantics accurately.
+- Revert the premature-stop guard widening that came out of the review loop. The guard matches its fixed pending-work phrases and work verbs again, so a first-person sentence whose verb is not on that list no longer blocks, for example "I will publish the release notes after review." The turn-event plumbing that lets the guard fire at all, and the three false-positive reductions (finished answers, advice in finished answers, reasoning-only turns with no tool call), are kept.
 
 ## 0.1.2
 

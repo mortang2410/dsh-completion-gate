@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import{fileURLToPath}from'node:url';import{CompletionGateService}from'../lib/index.js'
+import test from 'node:test';import assert from 'node:assert/strict';import crypto from 'node:crypto';import{execFileSync}from'node:child_process';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import{fileURLToPath}from'node:url';import{CompletionGateService}from'../lib/index.js'
 // The first argument is kept for existing call sites and ignored: turn events reach the gate through the session/event hook.
 function agent(_events=[],header={cwd:process.cwd()}){const steers=[],followups=[];return{id:'a',session:{header},steer:m=>steers.push(m),followup:m=>followups.push(m),steers,followups}}
 const ctx={}
@@ -163,3 +163,109 @@ test('reasoning-only output with no tool call before it that says I will run nex
 // pre-loop reference 851656f; after the revert they must pass again. The first test fails on 05f6ae2.
 test('revert: the widened first-person forms no longer block',()=>{const widened=["The fix is in place and the tests pass. I will publish the release notes after review.","The fix is in place and the tests pass. I'm using the existing helper.","The fix is in place and the tests pass. I have to run the tests before merging.","The fix is in place. I should check the call site.","The fix is in place and the tests pass.\nI'll wait for the build to finish.","The fix is in place and the tests pass. I'll note the caveat.","The fix is in place and the tests pass. I'll leave the migration running and check the result.","The fix is in place and the tests pass. I'll be noting the caveat.","All changes are in place and the tests pass.\nNext step: I am going to run the build again.","The fix is in place and the tests pass. I'll recommend a fix and then run the tests.","The fix is in place and the tests pass. I'm noticing the caveat.","The fix is in place and the tests pass. I would like to run the migration next."];for(const text of widened){const svc=liveService();const a=agent();finalTurn(svc,a,1,[{type:'text',text}],{tool:true});assert.equal(svc.premature(a,1),null,`the guard must not block this sentence after the revert: ${text}`)}})
 test('revert: the pre-loop pending-work patterns still block',()=>{const blocking=["Now I need the call site, and in parallel start the Exa research.","Next I will inspect the call site.","I'll check the output.","Let me run the tests.","Still need to run the tests.","I need to run the tests again.","The fix is in place, and in parallel start the lint run."];for(const text of blocking){const svc=liveService();const a=agent();finalTurn(svc,a,1,[{type:'text',text}],{tool:true});assert.ok(svc.premature(a,1),`the guard must still fire: ${text}`)}})
+
+// Repositories section of the status action. A stub host carries a change recorder and captures the tool the gate
+// registers, so a test can call its execute. Status must never start a check, so the marker test is the proof.
+function tempGitRepo(t){const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'cg-status-')));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));execFileSync('git',['init','-q','.'],{cwd:dir});fs.writeFileSync(path.join(dir,'app.js'),'const value = 1\n');return dir}
+function statusService(summaries,config={}){const listeners=new Map();const tools={};const off=()=>()=>{};const reflect=summaries?{get:name=>name==='workspaceChanges'?{summary:(id,seq)=>summaries.get(`${id}:${seq}`)}:undefined}:{get:()=>undefined};const host={reflect,on:(name,listener)=>{listeners.set(name,listener);return off()},provide:off,tools:{register:definition=>{tools.completion_gate=definition;return off()}},commands:{register:off},systemPrompt:{section:off},webServer:{register:off}};const svc=service(host,config);svc.__listeners=listeners;svc.start();svc.__tool=tools.completion_gate;return svc}
+// One turn as the host publishes it: the turn starts, then its change record is announced under a sequence number that keys the summary.
+function announceTurn(svc,a,summaries,turn,cwd,paths){emit(svc,a,'turn/start',{turn});const seq=published+1;summaries.set(`${a.id}:${seq}`,{turn,cwd,files:paths.map(p=>({path:p,display:p,added:1,deleted:0})),total:paths.length,added:paths.length,deleted:0});emit(svc,a,'workspace/changes',{turn});return seq}
+
+test('status lists every repository the session changed, each with its catalog path and files', async t => {
+  const session = tempGitRepo(t)
+  const sibling = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js', path.join(sibling, 'app.js')])
+  const result = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  const lines = result.markdown.split('\n')
+  assert.equal(lines.filter(line => line.startsWith('### ')).length, 2, result.markdown)
+  for (const repo of [session, sibling]) {
+    assert.ok(lines.includes(`Root: ${repo}`), `missing root line for ${repo}`)
+    assert.ok(lines.includes(`Catalog: ${path.join(repo, '.dsh', 'verification.json')}`), `missing catalog line for ${repo}`)
+    assert.ok(lines.includes(`- ${path.join(repo, 'app.js')} (unclaimed)`), `missing file line under ${repo}`)
+  }
+})
+
+test('status runs no verification command, while a forced run does', async t => {
+  const session = tempGitRepo(t)
+  const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cg-status-marker-')))
+  t.after(() => fs.rmSync(scratch, { recursive: true, force: true }))
+  const marker = path.join(scratch, 'marker.txt')
+  fs.writeFileSync(path.join(session, 'package.json'), JSON.stringify({ name: 'fixture', version: '1.0.0', scripts: { test: `node -e "require('fs').writeFileSync('${marker}','ran')"` } }))
+  const summaries = new Map()
+  const statusSvc = statusService(summaries)
+  t.after(() => cleanupService(statusSvc))
+  const a = agent([], { cwd: session })
+  announceTurn(statusSvc, a, summaries, 1, session, ['app.js'])
+  const result = await statusSvc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  assert.equal(fs.existsSync(marker), false, 'status must not start the test script')
+  assert.equal(result.pass, null, 'status with no earlier run reports no machine result')
+
+  const runner = statusService(summaries)
+  t.after(() => cleanupService(runner))
+  const b = agent([], { cwd: session })
+  announceTurn(runner, b, summaries, 1, session, ['app.js'])
+  await runner.run(b, new AbortController().signal, { force: true })
+  assert.equal(fs.existsSync(marker), true, 'control: a forced run must start the test script, or the absence above proves nothing')
+})
+
+test('two evaluations keep one entry for a file and refresh its content key', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  const first = await svc.repositoryReport(a)
+  assert.equal(first.repositories.length, 1)
+  assert.equal(first.repositories[0].files.length, 1)
+  fs.writeFileSync(path.join(session, 'app.js'), 'const value = 2\n')
+  announceTurn(svc, a, summaries, 2, session, ['app.js'])
+  const second = await svc.repositoryReport(a)
+  assert.equal(second.repositories.length, 1)
+  assert.equal(second.repositories[0].files.length, 1, 'the same file must keep one entry')
+  const expected = `file:${crypto.createHash('sha256').update('const value = 2\n').digest('hex')}`
+  assert.equal(second.repositories[0].files[0].key, expected)
+  assert.notEqual(second.repositories[0].files[0].key, first.repositories[0].files[0].key)
+})
+
+test('with no change recorder, the repositories section says the changes cannot be determined', async t => {
+  const session = tempGitRepo(t)
+  const svc = statusService(null)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  emit(svc, a, 'turn/start', { turn: 1 })
+  const result = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  const section = result.markdown.slice(result.markdown.indexOf('## Repositories'))
+  assert.match(section, /cannot be determined/)
+})
+
+test('an earlier turn whose record the host no longer holds is named, even after later turns are read', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  const lost = announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  summaries.delete(`${a.id}:${lost}`)
+  announceTurn(svc, a, summaries, 2, session, [])
+  const result = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  assert.match(result.markdown, /^Notice: The host change record for turn 1 \(sequence \d+\) is no longer available/m)
+})
+
+test('a disposed session forgets its repositories', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  const before = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  assert.match(before.markdown, /^### /m, 'the session must hold a repository before it is disposed')
+  svc.__listeners.get('session/disposed')({ id: a.id })
+  const after = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  assert.doesNotMatch(after.markdown, /^### /m)
+})

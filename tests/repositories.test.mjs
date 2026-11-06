@@ -57,6 +57,24 @@ function failGitLookups(t) {
   return state
 }
 
+// The first `.git` lookup fails with EIO and every later lookup passes through. The count shows how many lookups ran.
+function failFirstGitLookup(t) {
+  const real = fs.promises.lstat
+  const state = { count: 0 }
+  t.mock.method(fs.promises, 'lstat', async (target, ...rest) => {
+    if (String(target).endsWith(`${path.sep}.git`)) {
+      state.count += 1
+      if (state.count === 1) {
+        const error = new Error(`EIO: i/o error, lstat '${target}'`)
+        error.code = 'EIO'
+        throw error
+      }
+    }
+    return real(target, ...rest)
+  })
+  return state
+}
+
 test('a file inside the session repository resolves to that repository', async t => {
   const repo = tempRepo(t)
   const elsewhere = tempDir(t)
@@ -195,17 +213,17 @@ test('a merge that cannot read a repository files nothing, and the next evaluati
   assert.equal(repos.repositories('s1')[0].files.length, 1)
 })
 
-// The second merge waits on the first merge's filing. When that filing fails, the waiter must reject too, not report
-// the turn as filed before.
+// The second merge waits on the first merge's filing. Only the first .git lookup fails here, so a second merge that
+// looked the repository up on its own would succeed, and the status and lookup-count assertions below would fail.
 test('two merges of one turn that start together both reject when the filing fails, and the retry files the turn', async t => {
   const repo = tempRepo(t)
   const repos = new RepositoryTracker()
-  const failing = failGitLookups(t)
+  const lookups = failFirstGitLookup(t)
   const args = { turn: 1, seq: 10, base: repo, files: ['app.js'], fallback: repo }
   const settled = await Promise.allSettled([repos.merge('s1', args), repos.merge('s1', args)])
   assert.deepEqual(settled.map(s => s.status), ['rejected', 'rejected'], 'a merge that waits on a failed filing must reject')
+  assert.equal(lookups.count, 1, 'only the first filing may look the repository up')
   assert.deepEqual(repos.repositories('s1'), [], 'a failed filing must file nothing')
-  failing.on = false
   assert.equal(await repos.merge('s1', args), true, 'the retry must file the turn')
   assert.equal(repos.repositories('s1')[0].files.length, 1)
 })

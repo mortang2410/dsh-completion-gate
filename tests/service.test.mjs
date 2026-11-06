@@ -3,7 +3,7 @@ import test from 'node:test';import assert from 'node:assert/strict';import cryp
 function agent(_events=[],header={cwd:process.cwd()}){const steers=[],followups=[];return{id:'a',session:{header},steer:m=>steers.push(m),followup:m=>followups.push(m),steers,followups}}
 const ctx={}
 
-function service(ctx,config={}){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cg-service-settings-'));const instance=new CompletionGateService(ctx,config,{settingsPath:path.join(dir,'settings.json')});instance.__testSettingsDir=dir;return instance}
+function service(ctx,config={},root=os.tmpdir()){fs.mkdirSync(root,{recursive:true});const dir=fs.mkdtempSync(path.join(root,'cg-service-settings-'));const instance=new CompletionGateService(ctx,config,{settingsPath:path.join(dir,'settings.json')});instance.__testSettingsDir=dir;return instance}
 function cleanupService(instance){if(instance?.__testSettingsDir)fs.rmSync(instance.__testSettingsDir,{recursive:true,force:true})}
 
 // The gate started against a stub host. Turn events are published through its session/event hook, the way dsh-session
@@ -171,7 +171,7 @@ const workRoot=path.join(os.homedir(),'Trash','kv4x-tests')
 function makeWorkDir(prefix){fs.mkdirSync(workRoot,{recursive:true});return fs.realpathSync(fs.mkdtempSync(path.join(workRoot,prefix)))}
 function tempPlainDir(t){const dir=makeWorkDir('plain-');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));return dir}
 function tempGitRepo(t){const dir=makeWorkDir('status-');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));execFileSync('git',['init','-q','.'],{cwd:dir});fs.writeFileSync(path.join(dir,'app.js'),'const value = 1\n');return dir}
-function statusService(summaries,config={}){const listeners=new Map();const tools={};const commands={};const off=()=>()=>{};const reflect=summaries?{get:name=>name==='workspaceChanges'?{summary:(id,seq)=>summaries.get(`${id}:${seq}`)}:undefined}:{get:()=>undefined};const host={reflect,on:(name,listener)=>{listeners.set(name,listener);return off()},provide:off,tools:{register:definition=>{tools.completion_gate=definition;return off()}},commands:{register:definition=>{commands[definition.name]=definition;return off()}},systemPrompt:{section:off},webServer:{register:off}};const svc=service(host,config);svc.__listeners=listeners;svc.start();svc.__tool=tools.completion_gate;svc.__commands=commands;return svc}
+function statusService(summaries,config={}){const listeners=new Map();const tools={};const commands={};const off=()=>()=>{};const reflect=summaries?{get:name=>name==='workspaceChanges'?{summary:(id,seq)=>summaries.get(`${id}:${seq}`)}:undefined}:{get:()=>undefined};const host={reflect,on:(name,listener)=>{listeners.set(name,listener);return off()},provide:off,tools:{register:definition=>{tools.completion_gate=definition;return off()}},commands:{register:definition=>{commands[definition.name]=definition;return off()}},systemPrompt:{section:off},webServer:{register:off}};const svc=service(host,config,workRoot);svc.__listeners=listeners;svc.start();svc.__tool=tools.completion_gate;svc.__commands=commands;return svc}
 // One turn as the host publishes it: the turn starts, then its change record is announced under a sequence number that keys the summary.
 function announceTurn(svc,a,summaries,turn,cwd,paths){emit(svc,a,'turn/start',{turn});const seq=published+1;summaries.set(`${a.id}:${seq}`,{turn,cwd,files:paths.map(p=>({path:p,display:p,added:1,deleted:0})),total:paths.length,added:paths.length,deleted:0});emit(svc,a,'workspace/changes',{turn});return seq}
 
@@ -222,6 +222,30 @@ test('the gate-status command shows the repositories and starts no check', async
   assert.equal(result.kind, 'success')
   assert.equal(run.mock.callCount(), 0)
   assert.ok(result.text.includes(`Root: ${session}`), result.text)
+})
+
+test('status fixtures keep their settings directory under the task root, not the system temporary directory', t => {
+  const svc = statusService(new Map())
+  t.after(() => cleanupService(svc))
+  assert.ok(svc.__testSettingsDir.startsWith(`${workRoot}${path.sep}`), `settings directory ${svc.__testSettingsDir} is outside ${workRoot}`)
+})
+
+// Characterization, not a red test: the comment that said no git process starts was false, and this pins the status
+// path for a changed nested repository, which reads that repository's HEAD through git. The run seam must stay unused.
+test('a changed nested repository is read by status without starting a check', async t => {
+  const session = tempGitRepo(t)
+  const nested = path.join(session, 'vendor')
+  fs.mkdirSync(nested)
+  execFileSync('git', ['init', '-q', '.'], { cwd: nested })
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const run = t.mock.method(svc, 'run', async () => { throw new Error('status must not call run') })
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['vendor'])
+  const result = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  assert.equal(run.mock.callCount(), 0)
+  assert.ok(result.markdown.includes(`Root: ${nested}`), result.markdown)
 })
 
 test('a session outside any git repository gets a notice that its change record covers file-tool edits only', async t => {

@@ -237,7 +237,10 @@ test('the gate command shows the repositories section too, as the status command
   const result = await svc.__commands.gate.handler({ agent: a, rawInput: '' })
   assert.equal(run.mock.callCount(), 1)
   assert.equal(result.kind, 'success')
-  assert.ok(result.text.includes(`Root: ${session}`), result.text)
+  const lines = result.text.split('\n')
+  assert.ok(lines.includes(`Root: ${session}`), result.text)
+  assert.ok(lines.includes(`Catalog: ${path.join(session, '.dsh', 'verification.json')}`), `missing catalog line: ${result.text}`)
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed)`), `missing file line: ${result.text}`)
 })
 
 test('status fixtures keep their settings directory under the task root, not the system temporary directory', t => {
@@ -294,6 +297,22 @@ test('two evaluations keep one entry for a file and refresh its content key', as
   const expected = `file:${crypto.createHash('sha256').update('const value = 2\n').digest('hex')}`
   assert.equal(second.repositories[0].files[0].key, expected)
   assert.notEqual(second.repositories[0].files[0].key, first.repositories[0].files[0].key)
+})
+
+// Two reads that overlap for the same turn. The first read starts filing the turn while the second read is still
+// waiting on the same record, so the second read must wait for that filing. Both reads must list the repository and its file.
+test('overlapping reads of one turn both list its repository and file', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  const reports = await Promise.all([svc.repositoryReport(a), svc.repositoryReport(a)])
+  for (const report of reports) {
+    assert.deepEqual(report.repositories.map(repo => repo.root), [session], 'every read must list the repository')
+    assert.deepEqual(report.repositories[0].files.map(file => file.absolute), [path.join(session, 'app.js')])
+  }
 })
 
 test('with no change recorder, the repositories section says the changes cannot be determined', async t => {

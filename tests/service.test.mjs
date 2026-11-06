@@ -224,6 +224,22 @@ test('the gate-status command shows the repositories and starts no check', async
   assert.ok(result.text.includes(`Root: ${session}`), result.text)
 })
 
+// The spec says /gate and /gate-status show the same report, so /gate carries the repositories section as status does.
+// The check seam is stubbed with a fixed report, so no project check runs.
+test('the gate command shows the repositories section too, as the status command does', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const run = t.mock.method(svc, 'run', async () => ({ pass: true, turn: 1, recordSeq: 1, workspaceLabel: 'test', checks: [], blockers: [] }))
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  const result = await svc.__commands.gate.handler({ agent: a, rawInput: '' })
+  assert.equal(run.mock.callCount(), 1)
+  assert.equal(result.kind, 'success')
+  assert.ok(result.text.includes(`Root: ${session}`), result.text)
+})
+
 test('status fixtures keep their settings directory under the task root, not the system temporary directory', t => {
   const svc = statusService(new Map())
   t.after(() => cleanupService(svc))

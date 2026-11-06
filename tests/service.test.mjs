@@ -165,9 +165,13 @@ test('revert: the widened first-person forms no longer block',()=>{const widened
 test('revert: the pre-loop pending-work patterns still block',()=>{const blocking=["Now I need the call site, and in parallel start the Exa research.","Next I will inspect the call site.","I'll check the output.","Let me run the tests.","Still need to run the tests.","I need to run the tests again.","The fix is in place, and in parallel start the lint run."];for(const text of blocking){const svc=liveService();const a=agent();finalTurn(svc,a,1,[{type:'text',text}],{tool:true});assert.ok(svc.premature(a,1),`the guard must still fire: ${text}`)}})
 
 // Repositories section of the status action. A stub host carries a change recorder and captures the tool the gate
-// registers, so a test can call its execute. Status must never start a check, so the marker test is the proof.
-function tempGitRepo(t){const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'cg-status-')));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));execFileSync('git',['init','-q','.'],{cwd:dir});fs.writeFileSync(path.join(dir,'app.js'),'const value = 1\n');return dir}
-function statusService(summaries,config={}){const listeners=new Map();const tools={};const off=()=>()=>{};const reflect=summaries?{get:name=>name==='workspaceChanges'?{summary:(id,seq)=>summaries.get(`${id}:${seq}`)}:undefined}:{get:()=>undefined};const host={reflect,on:(name,listener)=>{listeners.set(name,listener);return off()},provide:off,tools:{register:definition=>{tools.completion_gate=definition;return off()}},commands:{register:off},systemPrompt:{section:off},webServer:{register:off}};const svc=service(host,config);svc.__listeners=listeners;svc.start();svc.__tool=tools.completion_gate;return svc}
+// registers, so a test can call its execute. Status must never start a check, so each test spies on the run seam.
+// Test workspaces live under the task's Trash root, never the system temporary directory (AGENTS.md).
+const workRoot=path.join(os.homedir(),'Trash','kv4x-tests')
+function makeWorkDir(prefix){fs.mkdirSync(workRoot,{recursive:true});return fs.realpathSync(fs.mkdtempSync(path.join(workRoot,prefix)))}
+function tempPlainDir(t){const dir=makeWorkDir('plain-');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));return dir}
+function tempGitRepo(t){const dir=makeWorkDir('status-');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));execFileSync('git',['init','-q','.'],{cwd:dir});fs.writeFileSync(path.join(dir,'app.js'),'const value = 1\n');return dir}
+function statusService(summaries,config={}){const listeners=new Map();const tools={};const commands={};const off=()=>()=>{};const reflect=summaries?{get:name=>name==='workspaceChanges'?{summary:(id,seq)=>summaries.get(`${id}:${seq}`)}:undefined}:{get:()=>undefined};const host={reflect,on:(name,listener)=>{listeners.set(name,listener);return off()},provide:off,tools:{register:definition=>{tools.completion_gate=definition;return off()}},commands:{register:definition=>{commands[definition.name]=definition;return off()}},systemPrompt:{section:off},webServer:{register:off}};const svc=service(host,config);svc.__listeners=listeners;svc.start();svc.__tool=tools.completion_gate;svc.__commands=commands;return svc}
 // One turn as the host publishes it: the turn starts, then its change record is announced under a sequence number that keys the summary.
 function announceTurn(svc,a,summaries,turn,cwd,paths){emit(svc,a,'turn/start',{turn});const seq=published+1;summaries.set(`${a.id}:${seq}`,{turn,cwd,files:paths.map(p=>({path:p,display:p,added:1,deleted:0})),total:paths.length,added:paths.length,deleted:0});emit(svc,a,'workspace/changes',{turn});return seq}
 
@@ -182,6 +186,7 @@ test('status lists every repository the session changed, each with its catalog p
   const result = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
   const lines = result.markdown.split('\n')
   assert.equal(lines.filter(line => line.startsWith('### ')).length, 2, result.markdown)
+  assert.doesNotMatch(result.markdown, /outside any git repository/, 'a git session carries no coverage notice')
   for (const repo of [session, sibling]) {
     assert.ok(lines.includes(`Root: ${repo}`), `missing root line for ${repo}`)
     assert.ok(lines.includes(`Catalog: ${path.join(repo, '.dsh', 'verification.json')}`), `missing catalog line for ${repo}`)
@@ -189,27 +194,46 @@ test('status lists every repository the session changed, each with its catalog p
   }
 })
 
-test('status runs no verification command, while a forced run does', async t => {
+// A check runs only through run(). The spy throws instead of calling through, so a status that reached a check
+// fails here and no check executes.
+test('status starts no check: the run seam is never called', async t => {
   const session = tempGitRepo(t)
-  const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cg-status-marker-')))
-  t.after(() => fs.rmSync(scratch, { recursive: true, force: true }))
-  const marker = path.join(scratch, 'marker.txt')
-  fs.writeFileSync(path.join(session, 'package.json'), JSON.stringify({ name: 'fixture', version: '1.0.0', scripts: { test: `node -e "require('fs').writeFileSync('${marker}','ran')"` } }))
   const summaries = new Map()
-  const statusSvc = statusService(summaries)
-  t.after(() => cleanupService(statusSvc))
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const run = t.mock.method(svc, 'run', async () => { throw new Error('status must not call run') })
   const a = agent([], { cwd: session })
-  announceTurn(statusSvc, a, summaries, 1, session, ['app.js'])
-  const result = await statusSvc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
-  assert.equal(fs.existsSync(marker), false, 'status must not start the test script')
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  const result = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  assert.equal(run.mock.callCount(), 0)
   assert.equal(result.pass, null, 'status with no earlier run reports no machine result')
+  assert.match(result.markdown, /status executes none/)
+})
 
-  const runner = statusService(summaries)
-  t.after(() => cleanupService(runner))
-  const b = agent([], { cwd: session })
-  announceTurn(runner, b, summaries, 1, session, ['app.js'])
-  await runner.run(b, new AbortController().signal, { force: true })
-  assert.equal(fs.existsSync(marker), true, 'control: a forced run must start the test script, or the absence above proves nothing')
+test('the gate-status command shows the repositories and starts no check', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const run = t.mock.method(svc, 'run', async () => { throw new Error('gate-status must not call run') })
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  const result = await svc.__commands['gate-status'].handler({ agent: a, rawInput: '' })
+  assert.equal(result.kind, 'success')
+  assert.equal(run.mock.callCount(), 0)
+  assert.ok(result.text.includes(`Root: ${session}`), result.text)
+})
+
+test('a session outside any git repository gets a notice that its change record covers file-tool edits only', async t => {
+  const plain = tempPlainDir(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: plain })
+  emit(svc, a, 'turn/start', { turn: 1 })
+  emit(svc, a, 'turn/end', { turn: 1 })
+  const result = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  assert.match(result.markdown, /^Notice: The session's working directory is outside any git repository, so the host change record lists file-tool edits only/m, result.markdown)
 })
 
 test('two evaluations keep one entry for a file and refresh its content key', async t => {
@@ -268,4 +292,49 @@ test('a disposed session forgets its repositories', async t => {
   svc.__listeners.get('session/disposed')({ id: a.id })
   const after = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
   assert.doesNotMatch(after.markdown, /^### /m)
+})
+
+test('a repository that cannot be read is named in status, and the next status reads the turn again', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const real = fs.promises.lstat
+  const failing = { on: true }
+  t.mock.method(fs.promises, 'lstat', async (target, ...rest) => {
+    if (failing.on && String(target).endsWith(`${path.sep}.git`)) {
+      const error = new Error('EIO: i/o error')
+      error.code = 'EIO'
+      throw error
+    }
+    return real(target, ...rest)
+  })
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  const first = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  assert.match(first.markdown, /^Notice: Attributing the changed files of turn 1 to their repositories failed: EIO: i\/o error/m, first.markdown)
+  assert.match(first.markdown, /^Notice: Checking whether the session's working directory is inside a git repository failed: EIO: i\/o error/m, first.markdown)
+  assert.doesNotMatch(first.markdown, /^### /m, 'the unreadable turn must not be filed under the session folder')
+  failing.on = false
+  const second = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  assert.ok(second.markdown.includes(`Root: ${session}`), 'the next status must read the turn again')
+})
+
+test('status with an earlier machine result keeps that result, adds the repositories after it, and starts no check', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const run = t.mock.method(svc, 'run', async () => { throw new Error('status must not call run') })
+  const a = agent([], { cwd: session })
+  svc.state(a).lastReport = { pass: false, fingerprint: 'fp-earlier', blockers: ['earlier blocker'], workspaceLabel: 'session', turn: 1, recordSeq: 5, checks: [], changedFiles: [] }
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  const result = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  assert.equal(run.mock.callCount(), 0)
+  assert.equal(result.pass, false)
+  assert.equal(result.fingerprint, 'fp-earlier')
+  assert.deepEqual(result.blockers, ['earlier blocker'])
+  assert.match(result.markdown, /BLOCKED/)
+  assert.ok(result.markdown.indexOf('## Repositories') > result.markdown.indexOf('## Blocking reasons'), 'the repositories section follows the earlier report')
+  assert.ok(result.markdown.includes(`Root: ${session}`))
 })

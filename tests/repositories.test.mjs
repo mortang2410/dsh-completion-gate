@@ -17,8 +17,12 @@ function git(cwd, args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 }
 
+// Test workspaces live under the task's Trash root, never the system temporary directory (AGENTS.md).
+const workRoot = path.join(os.homedir(), 'Trash', 'kv4x-tests')
+
 function tempDir(t) {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cg-repos-')))
+  fs.mkdirSync(workRoot, { recursive: true })
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(workRoot, 'repos-')))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   return dir
 }
@@ -36,6 +40,21 @@ function tempRepo(t) {
 
 function nestedState() {
   return { heads: new Map(), unreadable: [], unresolved: [], unborn: [] }
+}
+
+// Every lstat of a `.git` entry fails with EIO while `state.on` is true, the way an unreadable repository does.
+function failGitLookups(t) {
+  const real = fs.promises.lstat
+  const state = { on: true }
+  t.mock.method(fs.promises, 'lstat', async (target, ...rest) => {
+    if (state.on && String(target).endsWith(`${path.sep}.git`)) {
+      const error = new Error(`EIO: i/o error, lstat '${target}'`)
+      error.code = 'EIO'
+      throw error
+    }
+    return real(target, ...rest)
+  })
+  return state
 }
 
 test('a file inside the session repository resolves to that repository', async t => {
@@ -156,4 +175,22 @@ test('the catalog path of each repository is the .dsh/verification.json inside i
   await repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js'], fallback: repo })
   assert.equal(repos.repositories('s1').length, 1, 'the merged file must create its repository')
   assert.equal(repos.repositories('s1')[0].catalogPath, path.join(repo, '.dsh', 'verification.json'))
+})
+
+test('a repository whose metadata cannot be read is an error, never the session fallback', async t => {
+  const repo = tempRepo(t)
+  const session = tempDir(t)
+  failGitLookups(t)
+  await assert.rejects(owningRoot(path.join(repo, 'app.js'), session), { code: 'EIO' })
+})
+
+test('a merge that cannot read a repository files nothing, and the next evaluation reads the turn again', async t => {
+  const repo = tempRepo(t)
+  const repos = new RepositoryTracker()
+  const failing = failGitLookups(t)
+  await assert.rejects(repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js'], fallback: repo }), { code: 'EIO' })
+  assert.deepEqual(repos.repositories('s1'), [], 'a failed merge must file nothing')
+  failing.on = false
+  assert.equal(await repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js'], fallback: repo }), true, 'the failed turn must merge on the retry')
+  assert.equal(repos.repositories('s1')[0].files.length, 1)
 })

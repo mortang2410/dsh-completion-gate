@@ -192,6 +192,22 @@ test('register accepts a repository the session changed in an earlier turn, give
   assert.equal(readCatalog(sibling).items[0].id, 'sibling-smoke')
 })
 
+test('register writes into a symlinked sibling repository, never into the workspace that links to it', async t => {
+  const session = gitRepo('session-')
+  const sibling = gitRepo('sibling-')
+  fs.writeFileSync(path.join(sibling, 'app.js'), 'const value = 1\n')
+  fs.symlinkSync(sibling, path.join(session, 'vendor'))
+  const summaries = new Map()
+  const svc = gateFor(t, summaries)
+  const a = agentIn(session)
+  announceTurn(svc, a, summaries, 1, session, ['vendor/app.js'])
+  await register(svc, a, 'vendor', [{ name: 'Sibling smoke', proves: 'The sibling starts.' }])
+  assert.equal(fs.existsSync(path.join(session, '.dsh')), false, 'the workspace gets no catalog')
+  assert.equal(readCatalog(sibling).items[0].id, 'sibling-smoke')
+  assert.equal(excludeLines(sibling).includes('.dsh/'), true, 'the sibling excludes its own catalog')
+  assert.equal(excludeLines(session).includes('.dsh/'), false, 'the workspace exclude file is unchanged')
+})
+
 test('register refuses proves longer than the 1000 character bound and writes nothing', async t => {
   const repo = gitRepo()
   const svc = gateFor(t)

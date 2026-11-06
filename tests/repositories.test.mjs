@@ -120,6 +120,13 @@ test('a path outside every repository falls back to the session working director
   assert.equal(await owningRoot(path.join(outside, 'notes.txt'), session), session)
 })
 
+test('a symlink that loops on itself is not a directory, so its walk starts at its parent', async t => {
+  const repo = tempRepo(t)
+  const loop = path.join(repo, 'loop')
+  fs.symlinkSync(loop, loop)
+  assert.equal(await owningRoot(loop, tempDir(t)), repo)
+})
+
 test('the owning repository follows the durable path, never the display string', async t => {
   const session = tempRepo(t)
   const sibling = tempRepo(t)

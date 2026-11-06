@@ -208,6 +208,38 @@ test('register writes into a symlinked sibling repository, never into the worksp
   assert.equal(excludeLines(session).includes('.dsh/'), false, 'the workspace exclude file is unchanged')
 })
 
+test('register keeps the item text as entered, and the register and status reports still show each item on one line', async t => {
+  const repo = gitRepo()
+  const svc = gateFor(t)
+  const a = agentIn(repo)
+  const result = await svc.__tool.execute({ action: 'register', repository_root: repo, items: [{ name: 'Lint\n## Forged name', proves: 'Line one\n### Forged heading' }] }, { agent: a, signal: signal() })
+  const stored = readCatalog(repo).items[0]
+  assert.equal(stored.name, 'Lint\n## Forged name', 'the catalog holds the name as entered')
+  assert.equal(stored.proves, 'Line one\n### Forged heading', 'the catalog holds the proves text as entered')
+  assert.equal(result.markdown.split('\n').some(line => line.startsWith('## Forged')), false, 'the register report starts no heading from the name')
+  const { markdown } = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: signal() })
+  const lines = markdown.split('\n')
+  assert.equal(lines.some(line => line.startsWith('## Forged') || line.startsWith('### Forged')), false, 'the status report starts no heading from the item text')
+  assert.equal(lines.filter(line => line.startsWith('- lint-forged-name: Lint ## Forged name | Proves: Line one ### Forged heading')).length, 1, 'the status item is one line')
+})
+
+test('an unreadable catalog quotes its text on one line in the status report', async t => {
+  const repo = gitRepo()
+  fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 1\n')
+  const file = path.join(repo, '.dsh', 'verification.json')
+  fs.mkdirSync(path.dirname(file))
+  fs.writeFileSync(file, '{\n"a":\n### Forged\n}\n')
+  const summaries = new Map()
+  const svc = gateFor(t, summaries)
+  const a = agentIn(repo)
+  announceTurn(svc, a, summaries, 1, repo, ['app.js'])
+  const { markdown } = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: signal() })
+  const lines = markdown.split('\n')
+  assert.ok(markdown.includes('### Forged'), 'the parse problem quotes the file text, so the check below is not vacuous')
+  assert.equal(lines.some(line => line.startsWith('### Forged')), false, 'the quoted file text starts no heading of its own')
+  assert.equal(lines.filter(line => line.startsWith('Catalog unreadable')).length, 1, 'the problem is one line')
+})
+
 test('register refuses proves longer than the 1000 character bound and writes nothing', async t => {
   const repo = gitRepo()
   const svc = gateFor(t)

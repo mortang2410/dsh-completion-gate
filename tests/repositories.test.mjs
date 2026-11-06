@@ -227,3 +227,38 @@ test('two merges of one turn that start together both reject when the filing fai
   assert.equal(await repos.merge('s1', args), true, 'the retry must file the turn')
   assert.equal(repos.repositories('s1')[0].files.length, 1)
 })
+
+// The first .git lookup waits on a gate that the test opens, so the first filing stays in flight until release() runs.
+// The gate is released on test exit even when an assertion fails, so no merge is left pending.
+function holdFirstGitLookup(t) {
+  const real = fs.promises.lstat
+  const state = { count: 0, release: null }
+  const gate = new Promise(resolve => { state.release = resolve })
+  t.after(() => state.release())
+  t.mock.method(fs.promises, 'lstat', async (target, ...rest) => {
+    if (String(target).endsWith(`${path.sep}.git`)) {
+      state.count += 1
+      if (state.count === 1) await gate
+    }
+    return real(target, ...rest)
+  })
+  return state
+}
+
+// Deterministic form of the overlap: the first filing is held in flight, so the second merge of the same pair must
+// wait on it. The second result may settle only after the first filing settles, and both results then come back.
+test('a second merge of one turn stays pending until the first filing settles', async t => {
+  const repo = tempRepo(t)
+  const repos = new RepositoryTracker()
+  const gate = holdFirstGitLookup(t)
+  const args = { turn: 1, seq: 10, base: repo, files: ['app.js'], fallback: repo }
+  const first = repos.merge('s1', args)
+  const second = repos.merge('s1', args)
+  let secondSettled = false
+  second.then(() => { secondSettled = true }, () => { secondSettled = true })
+  for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(secondSettled, false, 'the second merge must wait while the first filing is in flight')
+  gate.release()
+  assert.deepEqual(await Promise.all([first, second]), [true, false])
+  assert.equal(repos.repositories('s1')[0].files.length, 1)
+})

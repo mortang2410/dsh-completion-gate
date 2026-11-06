@@ -400,3 +400,44 @@ test('status with an earlier machine result keeps that result, adds the reposito
   assert.ok(result.markdown.indexOf('## Repositories') > result.markdown.indexOf('## Blocking reasons'), 'the repositories section follows the earlier report')
   assert.ok(result.markdown.includes(`Root: ${session}`))
 })
+
+// The catalog section of status: each repository's items, one line per item. The item line format is fixed here:
+// "- <id>: <name> | Proves: <proves> | Command: <command or none>".
+test('status lists the catalog items of two repositories', async t => {
+  const session = tempGitRepo(t)
+  const sibling = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const run = t.mock.method(svc, 'run', async () => { throw new Error('register and status must not call run') })
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js', path.join(sibling, 'app.js')])
+  await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Lint', proves: 'No lint errors.' }] }, { agent: a, signal: new AbortController().signal })
+  await svc.__tool.execute({ action: 'register', repository_root: sibling, items: [{ name: 'Smoke', proves: 'It starts.', command: 'node smoke.js' }] }, { agent: a, signal: new AbortController().signal })
+  const result = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  assert.equal(run.mock.callCount(), 0)
+  const lines = result.markdown.split('\n')
+  assert.ok(lines.includes('- lint: Lint | Proves: No lint errors. | Command: none'), result.markdown)
+  assert.ok(lines.includes('- smoke: Smoke | Proves: It starts. | Command: node smoke.js'), result.markdown)
+  assert.ok(lines.includes(`Catalog: ${path.join(sibling, '.dsh', 'verification.json')}`), result.markdown)
+})
+
+// A repository with no catalog says so. A catalog that cannot be parsed is named as unreadable with its problem, and is
+// never listed as an empty catalog, because an empty list would read as a clean repository.
+test('status says a repository has no catalog yet, and names an unreadable catalog instead of an empty list', async t => {
+  const session = tempGitRepo(t)
+  const broken = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const run = t.mock.method(svc, 'run', async () => { throw new Error('status must not call run') })
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js', path.join(broken, 'app.js')])
+  fs.mkdirSync(path.join(broken, '.dsh'))
+  fs.writeFileSync(path.join(broken, '.dsh', 'verification.json'), '{"version": 1,')
+  const result = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  assert.equal(run.mock.callCount(), 0)
+  assert.match(result.markdown, /No catalog exists yet/)
+  assert.match(result.markdown, /Catalog unreadable, so its items are not listed: the file is not valid JSON/)
+  assert.doesNotMatch(result.markdown, /Catalog readable, with no items yet/, 'an unreadable catalog is never shown as readable and empty')
+})

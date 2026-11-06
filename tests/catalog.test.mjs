@@ -6,18 +6,17 @@ import os from 'node:os'
 import path from 'node:path'
 import { CompletionGateService } from '../lib/index.js'
 
-// Test workspaces live under the task's Trash root, never the system temporary directory (AGENTS.md).
+// Test workspaces live under the task's Trash root, never the system temporary directory (AGENTS.md). The tests never
+// delete them, so each run leaves its workspaces in that Trash root for the user to clear.
 const workRoot = path.join(os.homedir(), 'Trash', '122g-tests')
 
-function makeWorkDir(t, prefix) {
+function makeWorkDir(prefix) {
   fs.mkdirSync(workRoot, { recursive: true })
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(workRoot, prefix)))
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
-  return dir
+  return fs.realpathSync(fs.mkdtempSync(path.join(workRoot, prefix)))
 }
 
-function gitRepo(t, prefix = 'repo-') {
-  const dir = makeWorkDir(t, prefix)
+function gitRepo(prefix = 'repo-') {
+  const dir = makeWorkDir(prefix)
   execFileSync('git', ['init', '-q', '.'], { cwd: dir })
   return dir
 }
@@ -45,7 +44,7 @@ function gateFor(t, summaries = new Map()) {
     systemPrompt: { section: off },
     webServer: { register: off },
   }
-  const settingsDir = makeWorkDir(t, 'settings-')
+  const settingsDir = makeWorkDir('settings-')
   const svc = new CompletionGateService(host, {}, { settingsPath: path.join(settingsDir, 'settings.json') })
   svc.start()
   svc.__listeners = listeners
@@ -79,7 +78,7 @@ function excludeLines(repo) {
 }
 
 test('register writes a version 1 catalog whose item ids are the name slugs', async t => {
-  const repo = gitRepo(t)
+  const repo = gitRepo()
   const svc = gateFor(t)
   await register(svc, agentIn(repo), repo, [{ name: 'Unit tests (npm)', proves: 'The parser handles every fixture.', command: 'npm test' }])
   const catalog = readCatalog(repo)
@@ -95,7 +94,7 @@ test('register writes a version 1 catalog whose item ids are the name slugs', as
 })
 
 test('a missing proves is refused with an error, and no catalog or exclusion is written', async t => {
-  const repo = gitRepo(t)
+  const repo = gitRepo()
   const svc = gateFor(t)
   const before = excludeLines(repo)
   await assert.rejects(register(svc, agentIn(repo), repo, [{ name: 'Lint' }]), /proves/)
@@ -104,7 +103,7 @@ test('a missing proves is refused with an error, and no catalog or exclusion is 
 })
 
 test('re-registering a name updates proves and command, keeps the id and addedAt, and moves updatedAt', async t => {
-  const repo = gitRepo(t)
+  const repo = gitRepo()
   const svc = gateFor(t)
   const a = agentIn(repo)
   await register(svc, a, repo, [{ name: 'Build', proves: 'It compiles.', command: 'npm run build' }])
@@ -121,7 +120,7 @@ test('re-registering a name updates proves and command, keeps the id and addedAt
 })
 
 test('two different names whose slugs collide get distinct ids', async t => {
-  const repo = gitRepo(t)
+  const repo = gitRepo()
   const svc = gateFor(t)
   await register(svc, agentIn(repo), repo, [
     { name: 'Unit tests', proves: 'First.' },
@@ -134,7 +133,7 @@ test('two different names whose slugs collide get distinct ids', async t => {
 })
 
 test('the .dsh/ exclude line is appended once across two registers, git ignores the catalog, and .gitignore is unchanged', async t => {
-  const repo = gitRepo(t)
+  const repo = gitRepo()
   fs.writeFileSync(path.join(repo, '.gitignore'), 'node_modules/\n')
   const svc = gateFor(t)
   const a = agentIn(repo)
@@ -147,7 +146,7 @@ test('the .dsh/ exclude line is appended once across two registers, git ignores 
 })
 
 test('a corrupt catalog makes register refuse, naming the path and the parse failure, and leaves its bytes unchanged', async t => {
-  const repo = gitRepo(t)
+  const repo = gitRepo()
   const file = path.join(repo, '.dsh', 'verification.json')
   fs.mkdirSync(path.dirname(file))
   const bytes = '{"version": 1, "items": [\n'
@@ -163,7 +162,7 @@ test('a corrupt catalog makes register refuse, naming the path and the parse fai
 })
 
 test('a root with no git gets the catalog and reports no exclusion, without an error', async t => {
-  const dir = makeWorkDir(t, 'plain-')
+  const dir = makeWorkDir('plain-')
   const svc = gateFor(t)
   const result = await register(svc, agentIn(dir), dir, [{ name: 'Smoke', proves: 'The script starts.' }])
   assert.equal(readCatalog(dir).items[0].id, 'smoke')
@@ -172,8 +171,8 @@ test('a root with no git gets the catalog and reports no exclusion, without an e
 })
 
 test('register refuses a repository root the session has not seen, and writes nothing there', async t => {
-  const session = gitRepo(t, 'session-')
-  const stranger = gitRepo(t, 'stranger-')
+  const session = gitRepo('session-')
+  const stranger = gitRepo('stranger-')
   const svc = gateFor(t)
   const before = excludeLines(stranger)
   await assert.rejects(register(svc, agentIn(session), stranger, [{ name: 'Lint', proves: 'No lint errors.' }]), /not a repository this session/)
@@ -182,8 +181,8 @@ test('register refuses a repository root the session has not seen, and writes no
 })
 
 test('register accepts a repository the session changed in an earlier turn, given as a path relative to the session', async t => {
-  const session = gitRepo(t, 'session-')
-  const sibling = gitRepo(t, 'sibling-')
+  const session = gitRepo('session-')
+  const sibling = gitRepo('sibling-')
   fs.writeFileSync(path.join(sibling, 'app.js'), 'const value = 1\n')
   const summaries = new Map()
   const svc = gateFor(t, summaries)
@@ -194,7 +193,7 @@ test('register accepts a repository the session changed in an earlier turn, give
 })
 
 test('register refuses proves longer than the 1000 character bound and writes nothing', async t => {
-  const repo = gitRepo(t)
+  const repo = gitRepo()
   const svc = gateFor(t)
   await assert.rejects(register(svc, agentIn(repo), repo, [{ name: 'Long', proves: 'x'.repeat(1001) }]), /1000 characters/)
   assert.equal(fs.existsSync(path.join(repo, '.dsh')), false)

@@ -221,7 +221,10 @@ test('the gate-status command shows the repositories and starts no check', async
   const result = await svc.__commands['gate-status'].handler({ agent: a, rawInput: '' })
   assert.equal(result.kind, 'success')
   assert.equal(run.mock.callCount(), 0)
-  assert.ok(result.text.includes(`Root: ${session}`), result.text)
+  const lines = result.text.split('\n')
+  assert.ok(lines.includes(`Root: ${session}`), result.text)
+  assert.ok(lines.includes(`Catalog: ${path.join(session, '.dsh', 'verification.json')}`), `missing catalog line: ${result.text}`)
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed)`), `missing file line: ${result.text}`)
 })
 
 // The spec says /gate and /gate-status show the same report, so /gate carries the repositories section as status does.

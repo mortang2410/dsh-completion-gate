@@ -47,16 +47,20 @@ function recorder(entries = new Map()) {
 function service({ workspaceChanges = recorder() } = {}) {
   fs.mkdirSync(workRoot, { recursive: true })
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(workRoot, 'cg-gate-settings-')))
-  // The gate starts against a stub host, so the test drives its change observer and its stop hook directly.
+  // The gate starts against a stub host, so the test drives its change observer and its stop hook directly. The
+  // session/event listener is captured so a real user message reaches the prompt bound the way the host sends it.
+  const listeners = new Map()
   const off = () => () => {}
   const ctx = {
     reflect: { get: name => (name === 'workspaceChanges' ? workspaceChanges : undefined) },
-    on: () => off(),
+    on: (name, listener) => { listeners.set(name, listener); return off() },
     provide: off, tools: { register: off }, commands: { register: off }, systemPrompt: { section: off }, webServer: { register: off },
   }
   const instance = new CompletionGateService(ctx, {}, { settingsPath: path.join(dir, 'settings.json') })
   instance.__testSettingsDir = dir
   instance.start()
+  let published = 0
+  instance.publish = (sessionId, type, data) => listeners.get('session/event')({ id: sessionId }, { type, seq: ++published, time: Date.now(), data })
   return instance
 }
 
@@ -204,7 +208,12 @@ test('a turn keeps its attestation across repeated stops while its files and con
     fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 3\n')
     publish(309)
     await svc.stopping({ agent, turn: 3 })
-    assert.equal(agent.steers.length, 2, 'an edited file must reopen the repository and send one message')
+    assert.equal(agent.steers.length, 1, 'a changed file inside the prompt must not speak again; the reopen waits for the next real user message')
+    // The next real user prompt starts turn 4, which re-arms the one message and names the reopened repository.
+    announce(svc, 'session-1', 4, 311, [file('app.js')], repo)
+    svc.publish('session-1', 'user/message', { id: 'prompt-4', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'continue' }] })
+    await svc.stopping({ agent, turn: 4 })
+    assert.equal(agent.steers.length, 2, 'the next real prompt sends one message about the reopened repository')
     assert.match(agent.steers[1].content[0].text, /Attestation: stale/)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
@@ -305,7 +314,7 @@ test('a turn that changed nothing reports its stop result once the turn has ende
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-test('a stop after a transient diff read failure rescans the same bytes and names the credential the failed read hid', async t => {
+test('a stop after a transient diff read failure rescans the same bytes and names the credential the failed read hid, on the next real prompt', async t => {
   const repo = tempRepo(t)
   fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 2\npassword = "hunter2hunter2"\n')
   const changes = recorder()
@@ -331,12 +340,21 @@ test('a stop after a transient diff read failure rescans the same bytes and name
     assert.doesNotMatch(agent.steers[0].content[0].text, /Possible hard-coded credential/, 'the failed read hides the credential, so stop 1 cannot name it')
     assert.match(agent.steers[0].content[0].text, /1 changed file could not be read for this scan/, 'stop 1 must name the unread file, since no credential hit exists to carry it')
 
-    // Same bytes, same listed file. The diff now reads, so the credential must be found.
+    // A second stop of the same prompt stays silent even though the diff now reads: the prompt spent its message.
     publish(52)
     await svc.stopping({ agent, turn: 4, signal })
-    assert.equal(agent.steers.length, 2, `stop 2 must rescan the same bytes and send a second message: ${agent.steers.at(-1)?.content[0].text}`)
+    assert.equal(agent.steers.length, 1, 'a second stop of the same prompt must not speak again, whatever the diff read returns')
+
+    // The next real user message starts turn 5, whose change record is announced first. Same bytes, same listed
+    // file, and the diff now reads, so the credential the failed read hid must be named by that prompt's one message.
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 5 } })
+    svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq: 54, data: { turn: 5 } })
+    changes.entries.set('session-1:54', { turn: 5, cwd: repo, files: [file('app.js')], total: 1, added: 1, deleted: 0 })
+    svc.publish('session-1', 'user/message', { id: 'prompt-5', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'continue' }] })
+    await svc.stopping({ agent, turn: 5, signal })
+    assert.equal(agent.steers.length, 2, `the next prompt must rescan the same bytes and send its one message: ${agent.steers.at(-1)?.content[0].text}`)
     const text = agent.steers[1].content[0].text
-    assert.match(text, /Possible hard-coded credential or secret/, 'stop 2 must name the credential the failed read hid')
+    assert.match(text, /Possible hard-coded credential or secret/, 'the next prompt must name the credential the failed read hid')
     assert.doesNotMatch(text, /hunter2/, 'the matched value must never be written into the message')
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })

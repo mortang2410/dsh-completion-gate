@@ -107,6 +107,16 @@ function stop(svc, agent, turn = TURN) {
   return svc.stopping({ agent, turn, signal: new AbortController().signal })
 }
 
+// A real user prompt reaches the hook as the turn's `user/message` with the host's `user` source kind. The gate's
+// own steer and premature-stop followup carry this plugin's source, and synthetic context carries its producer's,
+// so this event is the only thing that starts a prompt and re-arms the one-message bound.
+function prompt(svc, agent, turn = TURN) {
+  svc.publish(agent, 'user/message', {
+    id: `prompt-${agent.id}-${turn}`, role: 'user', source: { kind: 'user' },
+    content: [{ type: 'text', text: 'continue' }],
+  })
+}
+
 function steerText(steer) { return steer.content.map(part => part.text).join('') }
 
 // The advisory shape every message keeps: it says nothing is stopped and never uses blocking wording.
@@ -168,10 +178,17 @@ test('the introduction appears in the first message for a repository and never a
   const svc = service()
   const agent = agentFor(repo)
   begin(svc, agent)
+  prompt(svc, agent)
   announce(svc, agent, { cwd: repo, files: ['app.js'] })
   await stop(svc, agent)
+  assert.equal(agent.steers.length, 1, 'the first prompt sends the first message')
   await stop(svc, agent)
-  assert.equal(agent.steers.length, 2, 'two stops over an unchanged set must send two steers under the bound')
+  assert.equal(agent.steers.length, 1, 'a later stop of the same prompt is silent')
+  begin(svc, agent, 4)
+  prompt(svc, agent, 4)
+  announce(svc, agent, { turn: 4, cwd: repo, files: ['app.js'] })
+  await stop(svc, agent, 4)
+  assert.equal(agent.steers.length, 2, 'the next real prompt sends one message')
   const first = steerText(agent.steers[0])
   const second = steerText(agent.steers[1])
   assert.ok(first.includes(INTRO), 'the first message must introduce the repository')
@@ -181,17 +198,18 @@ test('the introduction appears in the first message for a repository and never a
   assert.ok(second.includes(`Root: ${repo}`), 'the second message must still name the repository')
 })
 
-test('the introduction waits for a message the bound lets through', async () => {
+test('a silent stop does not spend the repository introduction', async () => {
   const repo = changedRepo('intro-wait')
-  const svc = service({ settings: { verificationNudgeLimit: 0 } })
+  const svc = service({ settings: { enabled: false } })
   const agent = agentFor(repo)
   begin(svc, agent)
+  prompt(svc, agent)
   announce(svc, agent, { cwd: repo, files: ['app.js'] })
   await stop(svc, agent)
-  assert.equal(agent.steers.length, 0, 'precondition: a zero limit sends nothing, so nothing is introduced')
-  svc.updateSettings({ verificationNudgeLimit: 3 })
+  assert.equal(agent.steers.length, 0, 'precondition: a disabled gate sends nothing, so nothing is introduced')
+  svc.updateSettings({ enabled: true })
   await stop(svc, agent)
-  assert.equal(agent.steers.length, 1, 'the first delivered message must come after the limit is raised')
+  assert.equal(agent.steers.length, 1, 'the first delivered message must come after the gate is enabled')
   assert.ok(steerText(agent.steers[0]).includes(INTRO), 'the introduction must reach the first delivered message')
 })
 
@@ -301,29 +319,24 @@ test('the message says it is advisory, nothing is stopped, and it never says BLO
   assert.doesNotMatch(text, /blocked|block/i, 'the message must not use blocking wording')
 })
 
-test('three messages for one change set, then silence, and a new change set speaks again', async () => {
+test('one prompt speaks once, a changed change set waits, and the next prompt speaks again', async () => {
   const repo = changedRepo('bound')
   const svc = service()
   const agent = agentFor(repo)
   begin(svc, agent)
+  prompt(svc, agent)
   announce(svc, agent, { cwd: repo, files: ['app.js'] })
   for (let i = 0; i < 4; i += 1) await stop(svc, agent)
-  assert.equal(agent.steers.length, 3, 'the default limit of three must cap the messages for one change set')
+  assert.equal(agent.steers.length, 1, 'the prompt speaks once, whatever the number of stops')
   fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 3\n')
   announce(svc, agent, { cwd: repo, files: ['app.js'] })
   await stop(svc, agent)
-  assert.equal(agent.steers.length, 4, 'a changed file is a new change set, which speaks again')
-})
-
-test('a nudge limit of zero means the gate never speaks', async () => {
-  const repo = changedRepo('zero')
-  const svc = service({ settings: { verificationNudgeLimit: 0 } })
-  const agent = agentFor(repo)
-  begin(svc, agent)
-  announce(svc, agent, { cwd: repo, files: ['app.js'] })
-  await stop(svc, agent)
-  await stop(svc, agent)
-  assert.equal(agent.steers.length, 0, 'a zero limit must send no message at all')
+  assert.equal(agent.steers.length, 1, 'a changed file inside the prompt must not speak again')
+  begin(svc, agent, 4)
+  prompt(svc, agent, 4)
+  announce(svc, agent, { turn: 4, cwd: repo, files: ['app.js'] })
+  await stop(svc, agent, 4)
+  assert.equal(agent.steers.length, 2, 'the next real prompt speaks again')
 })
 
 test('a repository changed after its attestation says its attestation is stale', async () => {
@@ -462,18 +475,19 @@ test('the stop runs no project check: a test script that writes a marker leaves 
   assert.equal(fs.existsSync(marker), false, 'the stop must not start the project test script')
 })
 
-test('an unchanged change set stays silent on a later turn once the bound is spent', async () => {
+test('a later turn without a real user prompt does not re-arm the advisory', async () => {
   const repo = changedRepo('bound-turn')
   const svc = service()
   const agent = agentFor(repo)
   begin(svc, agent, 3)
+  prompt(svc, agent, 3)
   announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
-  for (let i = 0; i < 3; i += 1) await stop(svc, agent, 3)
-  assert.equal(agent.steers.length, 3, 'precondition: the bound of three is spent on turn 3')
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 1, 'precondition: the prompt spent its one message')
   begin(svc, agent, 4)
   announce(svc, agent, { turn: 4, cwd: repo, files: ['app.js'] })
   await stop(svc, agent, 4)
-  assert.equal(agent.steers.length, 3, 'the same files with the same bytes on a later turn must stay silent')
+  assert.equal(agent.steers.length, 1, 'a turn the user did not start must not re-arm the message')
 })
 
 test('a message for 51 unfinished files names every file, the last one included', async () => {
@@ -633,4 +647,208 @@ test('a turn whose changed files cannot be attributed to a repository is named a
   assert.match(text, /could not attribute the changed files of turn 3 to their repositories: simulated EIO/, 'the message must name the turn and the failure')
   assert.match(text, /no project verification check ran/i, 'the message must say no check ran')
   assertAdvisory(text)
+})
+
+// Ticket personal#x9af: the advisory speaks at most once since the last real user message. The host dispatches the
+// stop hook at every attempt to end the turn, and the gate's own steer continues the turn, so a per-stop message
+// repeats. The prompt is the turn a real user message starts; its source kind tells it apart from this plugin's
+// steer and from the premature-stop recovery followup, which starts a turn of its own.
+
+test('a user prompt with unfinished work sends exactly one advisory across every stop of its turn', async () => {
+  const repo = changedRepo('one-per-prompt')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent)
+  prompt(svc, agent)
+  announce(svc, agent, { cwd: repo, files: ['app.js'] })
+  for (let i = 0; i < 4; i += 1) await stop(svc, agent)
+  assert.equal(agent.steers.length, 1, 'one prompt must produce at most one advisory, however often the model tries to end')
+})
+
+test('a second stop of the same prompt sends nothing even when the change set changed', async () => {
+  const repo = changedRepo('same-prompt-new-set')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent)
+  prompt(svc, agent)
+  announce(svc, agent, { cwd: repo, files: ['app.js'] })
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 1, 'precondition: the first stop sends the prompt advisory')
+  fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 3\n')
+  announce(svc, agent, { cwd: repo, files: ['app.js'] })
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 1, 'a changed file inside one prompt must not speak twice')
+  fs.writeFileSync(path.join(repo, 'app2.js'), 'const extra = 1\n')
+  announce(svc, agent, { cwd: repo, files: ['app.js', 'app2.js'] })
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 1, 'a new file inside one prompt must not speak twice')
+})
+
+test('a new real user message re-arms exactly one message', async () => {
+  const repo = changedRepo('rearm')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent, 3)
+  prompt(svc, agent, 3)
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
+  for (let i = 0; i < 3; i += 1) await stop(svc, agent, 3)
+  const before = agent.steers.length
+  begin(svc, agent, 4)
+  prompt(svc, agent, 4)
+  announce(svc, agent, { turn: 4, cwd: repo, files: ['app.js'] })
+  await stop(svc, agent, 4)
+  await stop(svc, agent, 4)
+  assert.equal(agent.steers.length, before + 1, 'a new real user message must re-arm exactly one advisory')
+  assert.equal(before, 1, 'precondition: the first prompt has spent its one message')
+})
+
+test('the gate\'s own steered continuation does not re-arm the advisory', async () => {
+  const repo = changedRepo('steer-no-rearm')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent)
+  prompt(svc, agent)
+  announce(svc, agent, { cwd: repo, files: ['app.js'] })
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 1)
+  // A steer stays in the same turn, and the host appends its message with this plugin's source.
+  svc.publish(agent, 'user/message', {
+    id: 'steered', role: 'user', source: { kind: 'plugin:dsh-completion-gate' },
+    content: [{ type: 'text', text: steerText(agent.steers[0]) }],
+  })
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 1, 'the gate\'s own steer must not re-arm its one message')
+})
+
+test('a premature-stop recovery turn does not re-arm the advisory, even with the message unspent', async () => {
+  const repo = changedRepo('followup-no-rearm')
+  const svc = service()
+  const agent = agentFor(repo)
+  // The real prompt changes nothing, so its own stop has nothing to say and the one message stays unspent.
+  begin(svc, agent, 3)
+  prompt(svc, agent, 3)
+  // The model ends turn 3 while saying work is pending, so the guard queues its recovery followup straight away.
+  svc.publish(agent, 'assistant/message', { turn: 3, message: { role: 'assistant', content: [{ type: 'text', text: 'Next I will run the suite.' }] } })
+  await stop(svc, agent, 3)
+  assert.equal(agent.followups.length, 1, 'precondition: a future-intent stop queues one recovery followup')
+  assert.equal(agent.steers.length, 0, 'precondition: the prompt message is still unspent')
+  // The followup opens the next host turn, and its message carries this plugin's source, so no real prompt starts.
+  // That turn owes real work, so a bound keyed on the turn number alone would speak here. The prompt is what bounds
+  // the message, so the recovery turn speaks the prompt's one message rather than a second one.
+  begin(svc, agent, 4)
+  const queued = svc.publish(agent, 'user/message', {
+    id: 'followup', role: 'user', source: { kind: 'plugin:dsh-completion-gate' },
+    content: [{ type: 'text', text: 'PREMATURE STOP RECOVERY: Continue the unfinished task.' }],
+  })
+  announce(svc, agent, { turn: 4, cwd: repo, files: ['app.js'] })
+  assert.ok(Number.isInteger(queued), 'precondition: the followup message was published')
+  assert.equal(svc.state(agent).promptTurn, 3, 'precondition: the followup did not start a prompt')
+  svc.publish(agent, 'assistant/message', { turn: 4, message: { role: 'assistant', content: [{ type: 'text', text: 'The suite passes.' }] } })
+  // The recovery turn answers plainly, so the guard queues no second followup and the stop reaches the bound.
+  await stop(svc, agent, 4)
+  assert.equal(agent.steers.length, 1, 'the recovery turn speaks the prompt\'s single message, not a second one')
+  await stop(svc, agent, 4)
+  assert.equal(agent.steers.length, 1, 'a later stop of the recovery turn must stay silent')
+  assert.equal(agent.followups.length, 1, 'the recovery turn must not queue a second followup')
+  // A real user message is what re-arms, so the next prompt speaks once more.
+  begin(svc, agent, 5)
+  prompt(svc, agent, 5)
+  announce(svc, agent, { turn: 5, cwd: repo, files: ['app.js'] })
+  await stop(svc, agent, 5)
+  assert.equal(agent.steers.length, 2, 'the next real prompt must re-arm exactly one message')
+})
+
+test('a notice recorded after the prompt message waits for the next real prompt', async () => {
+  const a = changedRepo('notice-wait-a')
+  const b = changedRepo('notice-wait-b')
+  const svc = service()
+  const agent = agentFor(a)
+  begin(svc, agent, 3)
+  prompt(svc, agent, 3)
+  announce(svc, agent, { turn: 3, cwd: a, files: ['app.js'] })
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 1)
+  assert.ok(steerText(agent.steers[0]).includes(INTRO), 'precondition: the first message introduces the first repository')
+  announce(svc, agent, { turn: 3, cwd: a, files: ['app.js', path.join(b, 'app.js')] })
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 1, 'a repository seen after the message must wait for the next prompt')
+  begin(svc, agent, 4)
+  prompt(svc, agent, 4)
+  announce(svc, agent, { turn: 4, cwd: a, files: ['app.js', path.join(b, 'app.js')] })
+  await stop(svc, agent, 4)
+  assert.equal(agent.steers.length, 2, 'the next real prompt carries the waiting notice')
+  const second = steerText(agent.steers[1])
+  assert.ok(second.includes(INTRO), 'the second message must introduce the repository that waited')
+  assert.ok(second.includes(`Root: ${b}`), 'the second message must name the waiting repository')
+})
+
+test('a credential hit recorded after the prompt message waits for the next real prompt', async () => {
+  const repo = changedRepo('credential-wait')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent, 3)
+  prompt(svc, agent, 3)
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'], diffs: [[]] })
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 1, 'precondition: the first stop sends the prompt advisory')
+  assert.doesNotMatch(steerText(agent.steers[0]), /Possible hard-coded credential/, 'the first message has no hit to name')
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'], diffs: [['+password = "hunter2hunter2"']] })
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 1, 'a hit recorded after the message must ride the next prompt, not a second message')
+  begin(svc, agent, 4)
+  prompt(svc, agent, 4)
+  announce(svc, agent, { turn: 4, cwd: repo, files: ['app.js'], diffs: [['+password = "hunter2hunter2"']] })
+  await stop(svc, agent, 4)
+  assert.equal(agent.steers.length, 2, 'the next prompt carries the hit')
+  const text = steerText(agent.steers[1])
+  assert.match(text, /Possible hard-coded credential or secret/, 'the next message must name the rule')
+  assert.doesNotMatch(text, /hunter2/, 'the matched value must never be written into the message')
+})
+
+test('verificationNudgeLimit is not consulted', async () => {
+  const repo = changedRepo('nudge-dead')
+  const svc = service({ settings: { verificationNudgeLimit: 0 } })
+  const agent = agentFor(repo)
+  begin(svc, agent, 3)
+  prompt(svc, agent, 3)
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
+  await stop(svc, agent, 3)
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 1, 'a zero verificationNudgeLimit must not silence the advisory')
+  begin(svc, agent, 4)
+  prompt(svc, agent, 4)
+  announce(svc, agent, { turn: 4, cwd: repo, files: ['app.js'] })
+  await stop(svc, agent, 4)
+  assert.equal(agent.steers.length, 2, 'the retired limit must not bound a later prompt either')
+})
+
+test('an enabled false setting silences the gate for a real prompt', async () => {
+  const repo = changedRepo('disabled-prompt')
+  const svc = service({ settings: { enabled: false } })
+  const agent = agentFor(repo)
+  begin(svc, agent, 3)
+  prompt(svc, agent, 3)
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 0, 'a disabled gate must not speak')
+  begin(svc, agent, 4)
+  prompt(svc, agent, 4)
+  await stop(svc, agent, 4)
+  assert.equal(agent.steers.length, 0, 'a disabled gate must stay silent across prompts')
+})
+
+test('a stop with nothing to say does not spend the prompt message', async () => {
+  const repo = changedRepo('nothing-then-something')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent, 3)
+  prompt(svc, agent, 3)
+  // The turn ended covered and announced no change, so the first stop has nothing to say.
+  svc.publish(agent, 'turn/end', { turn: 3 })
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 0, 'precondition: an unchanged turn sends nothing')
+  const b = changedRepo('nothing-then-something-b')
+  announce(svc, agent, { turn: 3, cwd: repo, files: [path.join(b, 'app.js')] })
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 1, 'the first stop with something to say must carry the prompt message')
 })

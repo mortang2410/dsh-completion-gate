@@ -123,14 +123,15 @@ test('the evaluation-error steer carries the producer-owned source kind', async 
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-// The control for the test above: the same failure with a nudge limit of zero steers no one, so the steer
-// it asserts can only come from a limit above zero.
-test('a zero nudge limit silences an evaluation-error steer', async t => {
+// The retired per-change-set nudge limit is no longer consulted, so a saved zero must not silence the
+// evaluation-error steer; the one-message-per-prompt bound is what can hold it back.
+test('a zero nudge limit does not silence an evaluation-error steer', async t => {
   const svc = service({ settings: { verificationNudgeLimit: 0 } })
   try {
     const agent = agentFor('')
     await svc.stopping({ agent, turn: 4, signal: new AbortController().signal })
-    assert.equal(agent.steers.length, 0, 'a zero nudge limit must send no evaluation-error steer')
+    assert.equal(agent.steers.length, 1, 'a zero nudge limit must not silence the evaluation-error steer')
+    assert.match(agent.steers[0].content.map(part => part.text).join(''), /could not evaluate the workspace/)
     assert.equal(agent.followups.length, 0, 'an evaluation failure is not a premature stop, so it produces no follow-up')
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })

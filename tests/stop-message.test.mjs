@@ -919,7 +919,7 @@ test('a second real user message in the same turn re-arms the bound', async () =
   announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
   await stop(svc, agent, 3)
   assert.equal(agent.steers.length, 1, 'precondition: the first prompt speaks')
-  svc.publish(agent, 'user/message', { id: 'prompt-3b', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'and now this' }] })
+  svc.publish(agent, 'user/message', userMessage(agent.id, 3))
   announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
   await stop(svc, agent, 3)
   assert.equal(agent.steers.length, 2, 'a second real prompt in the same turn must arm its own message')

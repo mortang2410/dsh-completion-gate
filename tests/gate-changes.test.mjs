@@ -367,7 +367,7 @@ test('a stop after a transient diff read failure rescans the same bytes and name
     svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 5 } })
     svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq: 54, data: { turn: 5 } })
     changes.entries.set('session-1:54', { turn: 5, cwd: repo, files: [file('app.js')], total: 1, added: 1, deleted: 0 })
-    svc.publish('session-1', 'user/message', { id: 'prompt-5', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'continue' }] })
+    userPrompt(svc, 'session-1', 5)
     await svc.stopping({ agent, turn: 5, signal })
     assert.equal(agent.steers.length, 2, `the next prompt must rescan the same bytes and send its one message: ${agent.steers.at(-1)?.content[0].text}`)
     const text = agent.steers[1].content[0].text

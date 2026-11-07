@@ -761,8 +761,7 @@ test('an outer repository whose only changed file moves into a nested repository
   const outer = lines.slice(outerAt, next === -1 ? lines.length : next)
   assert.ok(outer.includes('Status: complete'), `the emptied outer repository is not unfinished:\n${outer.join('\n')}`)
   assert.ok(lines.includes(`- ${file} (mine)`), 'the nested repository keeps the mine claim')
-  assert.ok(lines.some(line => line.startsWith('Notice: Repository ') && line.includes(`Repository ${session} changed`)), 'the reopen notice names the emptied repository')
-  assert.ok(!lines.some(line => line.startsWith('Notice: Repository ') && line.includes('attest again')), 'the reopen notice tells an emptied, complete repository to attest again')
+  assert.ok(lines.includes(`Notice: Repository ${session} changed after its attestation, so its claims and item states were cleared and the attestation was dropped.`), 'the reopen notice for the emptied repository states only the change, with no next step')
 })
 
 test('an emptied outer repository that still has catalog items keeps its missing attestation as a problem', async t => {

@@ -568,6 +568,20 @@ test('a refused attest changes nothing, even when a newer turn record is pending
   assert.ok(lines.includes('Attestation: missing'), 'the next read drops the attestation, since a changed file reopens the repository')
 })
 
+test('a refused register changes no claim, item state, or attestation, even when a newer turn record is pending', async t => {
+  const { session, svc, a, summaries } = await attestFixture(t)
+  assert.equal((await svc.__tool.execute(completeAttest(session), execOf(a))).pass, true)
+  fs.writeFileSync(path.join(session, 'other.js'), 'x\n')
+  announceTurn(svc, a, summaries, 2, session, ['other.js'])
+  const before = JSON.stringify(svc.repositories.repositories(a.id))
+  await assert.rejects(svc.__tool.execute({ action: 'register', repository_root: attestRepo(), items: [{ name: 'Other', proves: 'other.js sets value' }] }, execOf(a)), error => {
+    assert.match(error.message, /register refused/)
+    assert.match(error.message, /Nothing was written\./)
+    return true
+  })
+  assert.equal(JSON.stringify(svc.repositories.repositories(a.id)), before, 'a refused register changes no claim, item state, or attestation')
+})
+
 test('a later attest that names only items replaces the reviewed list and docs check, and keeps the claims it does not name', async t => {
   const { session, svc, a } = await attestFixture(t, ['app.js', 'other.js', 'NOTES.md'])
   const first = await svc.__tool.execute(attestArgs(session, {
@@ -594,6 +608,24 @@ test('two attest calls that overlap on one session both keep their claims', asyn
   const lines = await linesOf(svc, a)
   assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine)`), 'the claim from the first call survives the second call')
   assert.ok(lines.includes(`- ${path.join(session, 'other.js')} (not-mine)`), 'the claim from the second call is stored')
+})
+
+test('a register that overlaps an attest on one session keeps the claim the attest stored', async t => {
+  const { session, svc, a } = await attestFixture(t, ['app.js', 'other.js'])
+  // The register is the first call to read the report. That read stalls after the register has staged its copy, so the attest
+  // runs to completion in the middle of the register, and the register's later adopt is the one that could drop the claim.
+  const report = svc.repositoryReport.bind(svc)
+  let stalled = false
+  t.mock.method(svc, 'repositoryReport', async (agent, tracker) => {
+    if (!stalled) { stalled = true; await new Promise(resolve => setTimeout(resolve, 100)) }
+    return report(agent, tracker)
+  })
+  await Promise.all([
+    svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Lint', proves: 'No lint errors.' }] }, execOf(a)),
+    svc.__tool.execute(attestArgs(session, { claims: [{ path: 'app.js', decision: 'mine' }] }), execOf(a)),
+  ])
+  const lines = await linesOf(svc, a)
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine)`), 'the claim from the attest survives the overlapping register')
 })
 
 test('a changed documentation file is a problem until docs_checked is true', async t => {

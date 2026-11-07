@@ -165,6 +165,81 @@ test('attest is complete only when every obligation is met, and a rejected file 
   assert.ok((await linesOf(svc, a)).includes('- unit: Unit | passed'), 'the passed item is shown')
 })
 
+test('status lists each unrelated item under the repository that silenced it', async t => {
+  const session = attestRepo()
+  const sibling = attestRepo()
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent({ cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js', path.join(sibling, 'app.js')])
+  await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Unit', proves: 'app.js sets value' }, { name: 'Audit', proves: 'the audit log is complete' }] }, execOf(a))
+  await svc.__tool.execute({ action: 'register', repository_root: sibling, items: [{ name: 'Smoke', proves: 'it starts' }] }, execOf(a))
+  const claims = { claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'] }
+  const first = await svc.__tool.execute(attestArgs(session, { ...claims, items: [{ id: 'unit', state: 'passed' }, { id: 'audit', state: 'unrelated' }] }), execOf(a))
+  assert.equal(first.pass, true, first.markdown)
+  const second = await svc.__tool.execute(attestArgs(sibling, { ...claims, items: [{ id: 'smoke', state: 'passed' }] }), execOf(a))
+  assert.equal(second.pass, true, second.markdown)
+
+  const lines = await linesOf(svc, a)
+  const sectionOf = root => {
+    const at = lines.indexOf(`Root: ${root}`)
+    assert.ok(at >= 0, `the report lists ${root}`)
+    const next = lines.findIndex((line, index) => index > at && line.startsWith('Root: '))
+    return lines.slice(at, next === -1 ? lines.length : next)
+  }
+  assert.ok(sectionOf(session).includes('- audit: Audit | unrelated to this session'), `the mark is reported under its own repository:\n${sectionOf(session).join('\n')}`)
+  assert.ok(!sectionOf(sibling).some(line => line.includes('unrelated')), 'a repository the session did not silence shows no mark')
+})
+
+test('a reopen keeps the unrelated mark while the passed and assumed states are cleared', async t => {
+  const session = attestRepo()
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent({ cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Unit', proves: 'app.js sets value' }, { name: 'Browser', proves: 'the page renders' }, { name: 'Audit', proves: 'the audit log is complete' }] }, execOf(a))
+  const attested = await svc.__tool.execute(attestArgs(session, {
+    claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'],
+    items: [{ id: 'unit', state: 'passed' }, { id: 'browser', state: 'assumed', reason: 'no display is attached' }, { id: 'audit', state: 'unrelated' }],
+  }), execOf(a))
+  assert.equal(attested.pass, true, attested.markdown)
+  const before = await linesOf(svc, a)
+  assert.ok(before.includes('- audit: Audit | unrelated to this session'), 'precondition: the mark is reported before the change')
+  assert.ok(before.includes('- browser: Browser | assumed, not run: no display is attached'), 'precondition: the assumed state is reported before the change')
+
+  fs.writeFileSync(path.join(session, 'app.js'), 'const value = 2\n')
+  const lines = await linesOf(svc, a)
+  assert.ok(lines.some(line => line.startsWith('Notice: Repository ') && line.includes(`${session} changed after its attestation`)), 'the edited file reopens the repository')
+  assert.ok(lines.includes('- unit: Unit | not stated'), 'the passed state is cleared by the reopen')
+  assert.ok(lines.includes('- browser: Browser | not stated'), 'the assumed state is cleared by the reopen')
+  assert.ok(lines.includes('- audit: Audit | unrelated to this session'), 'the unrelated mark survives the reopen')
+  assert.ok(lines.includes('Attestation: missing'), 'the attestation is dropped')
+})
+
+test('a later attest replaces an unrelated mark with passed and then assumed', async t => {
+  const session = attestRepo()
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent({ cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Unit', proves: 'app.js sets value' }, { name: 'Audit', proves: 'the audit log is complete' }] }, execOf(a))
+  const claims = { claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'] }
+  const marked = await svc.__tool.execute(attestArgs(session, { ...claims, items: [{ id: 'unit', state: 'passed' }, { id: 'audit', state: 'unrelated' }] }), execOf(a))
+  assert.equal(marked.pass, true, marked.markdown)
+  assert.ok((await linesOf(svc, a)).includes('- audit: Audit | unrelated to this session'), 'precondition: the mark is stored')
+
+  const passed = await svc.__tool.execute(attestArgs(session, { ...claims, items: [{ id: 'audit', state: 'passed' }] }), execOf(a))
+  assert.equal(passed.pass, true, passed.markdown)
+  assert.ok((await linesOf(svc, a)).includes('- audit: Audit | passed'), 'a later attest replaces the mark with passed')
+
+  const assumed = await svc.__tool.execute(attestArgs(session, { ...claims, items: [{ id: 'audit', state: 'assumed', reason: 'the audit log needs data this session does not have' }] }), execOf(a))
+  assert.equal(assumed.pass, true, assumed.markdown)
+  assert.ok((await linesOf(svc, a)).includes('- audit: Audit | assumed, not run: the audit log needs data this session does not have'), 'a later attest replaces the mark with assumed and keeps its reason')
+})
+
 test('attest refuses each malformed argument and each unknown path or item with its message, and changes nothing', async t => {
   const { session, svc, a } = await attestFixture(t)
   const before = JSON.stringify(await svc.repositoryReport(a))
@@ -175,6 +250,8 @@ test('attest refuses each malformed argument and each unknown path or item with 
     [attestArgs(session, { claims: [{ path: 'missing.js', decision: 'mine' }] }), /missing\.js is not a changed file of this repository\./],
     [attestArgs(session, { items: [{ id: 'unit', state: 'assumed', reason: 5 }] }), /items\[0\]\.reason must be a string\./],
     [attestArgs(session, { items: [{ id: 'unit', state: 'passed', reason: 'ran it' }] }), /items\[0\] is passed, so it takes no reason\./],
+    [attestArgs(session, { items: [{ id: 'unit', state: 'irrelevant' }] }), /items\[0\]\.state must be passed, assumed, or unrelated\./],
+    [attestArgs(session, { items: [{ id: 'unit', state: 'unrelated', reason: 'not my work' }] }), /items\[0\] is unrelated, so it takes no reason\./],
     [attestArgs(session, { items: [{ id: 'unit', state: 'passed', name: 'Unit' }] }), /items\[0\] has an unknown key: name\./],
     [attestArgs(session, { items: [{ id: 'nope', state: 'passed' }] }), /nope is not an item in this repository's catalog\./],
     [attestArgs(session, { docs_checked: 'yes' }), /docs_checked must be true or false\./],

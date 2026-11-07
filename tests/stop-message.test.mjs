@@ -215,6 +215,76 @@ test('an assumed item shows its reason and is labelled a promise, not a run', as
   assert.match(text, /promise, not a pass/, 'an assumed item must be labelled as a promise')
 })
 
+test('an item marked unrelated to the session is omitted from the message', async () => {
+  const repo = changedRepo('unrelated-omitted')
+  writeCatalog(repo, ['unit', 'browser'])
+  fs.writeFileSync(path.join(repo, 'other.js'), 'const other = 1\n')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent)
+  announce(svc, agent, { cwd: repo, files: ['app.js', 'other.js'] })
+  const result = await svc.attest(agent, {
+    repository_root: repo,
+    claims: [{ path: 'app.js', decision: 'mine' }],
+    reviewed_code_files: ['app.js'],
+    items: [{ id: 'unit', state: 'passed' }, { id: 'browser', state: 'unrelated' }],
+  })
+  assert.equal(result.pass, false, 'precondition: other.js is unclaimed, so the repository stays open')
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 1)
+  const text = steerText(agent.steers[0])
+  assert.ok(text.includes('- unit (unit): passed'), `the item that bears on the session is listed: ${text}`)
+  assert.ok(text.includes(path.join(repo, 'other.js')), 'precondition: the unclaimed file is listed')
+  assert.doesNotMatch(text, /browser/, 'the unrelated item is omitted from the message')
+})
+
+test('a repository whose items are all unrelated contributes nothing to the message', async () => {
+  const repo = changedRepo('all-unrelated')
+  writeCatalog(repo, ['unit', 'browser'])
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent)
+  announce(svc, agent, { cwd: repo, files: ['app.js'] })
+  const result = await svc.attest(agent, {
+    repository_root: repo,
+    claims: [{ path: 'app.js', decision: 'mine' }],
+    reviewed_code_files: ['app.js'],
+    items: [{ id: 'unit', state: 'unrelated' }, { id: 'browser', state: 'unrelated' }],
+  })
+  assert.equal(result.pass, true, `precondition: nothing else is unfinished: ${result.problems.join(' | ')}`)
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 0, 'a repository with only unrelated items left must contribute nothing')
+})
+
+// The message when no item is marked unrelated: every item is listed with its state, in catalog order, exactly as before.
+test('with no item marked unrelated the message lists every item with its state', async () => {
+  const repo = changedRepo('no-unrelated')
+  writeCatalog(repo, ['unit', 'browser', 'smoke'])
+  fs.writeFileSync(path.join(repo, 'other.js'), 'const other = 1\n')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent)
+  announce(svc, agent, { cwd: repo, files: ['app.js', 'other.js'] })
+  await svc.attest(agent, {
+    repository_root: repo,
+    claims: [{ path: 'app.js', decision: 'mine' }],
+    reviewed_code_files: ['app.js'],
+    items: [{ id: 'unit', state: 'passed' }, { id: 'browser', state: 'assumed', reason: 'no display is attached' }],
+  })
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 1)
+  const lines = steerText(agent.steers[0]).split('\n')
+  const at = lines.indexOf('Verification items:')
+  assert.ok(at >= 0, 'precondition: the message lists the verification items')
+  const listed = []
+  for (let index = at + 1; index < lines.length && lines[index].startsWith('- '); index += 1) listed.push(lines[index])
+  assert.deepEqual(listed, [
+    '- unit (unit): passed',
+    '- browser (browser): assumed, not run. This is a promise, not a pass. Reason: no display is attached',
+    '- smoke (smoke): unfinished, no state reported yet',
+  ])
+})
+
 test('the message says it is advisory, nothing is stopped, and it never says BLOCKED', async () => {
   const repo = changedRepo('advisory')
   const svc = service()

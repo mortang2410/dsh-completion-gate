@@ -704,7 +704,7 @@ test('an outer repository whose only changed file moves into a nested repository
   const outer = lines.slice(outerAt, next === -1 ? lines.length : next)
   assert.ok(outer.includes('Status: complete'), `the emptied outer repository is not unfinished:\n${outer.join('\n')}`)
   assert.ok(lines.includes(`- ${file} (mine)`), 'the nested repository keeps the mine claim')
-  assert.ok(lines.includes(`Notice: Repository ${session} changed after its attestation, so its claims and item states were cleared and the attestation was dropped.`), 'the reopen notice for the emptied repository states only the change, with no next step')
+  assert.ok(lines.includes(`Notice: Repository ${session} changed after its attestation, so its claims and passed or assumed item states were cleared and the attestation was dropped.`), 'the reopen notice for the emptied repository states only the change, with no next step')
 })
 
 test('an emptied outer repository that still has catalog items keeps its missing attestation as a problem', async t => {
@@ -745,6 +745,14 @@ test('the completion_gate tool takes claims, reviewed_code_files, docs_checked, 
   const properties = svc.__tool.parameters.properties
   for (const key of ['claims', 'reviewed_code_files', 'docs_checked', 'summary', 'items', 'repository_root']) assert.ok(properties[key], `the schema takes ${key}`)
   for (const key of ['acceptance_criteria', 'unresolved_issues', 'reviewed_files', 'review_summary']) assert.equal(properties[key], undefined, `the schema no longer takes ${key}`)
+})
+
+// A catalog item is passed, assumed, or unrelated to this session (personal#f3za). The state is on the tool schema, so the
+// model can report it, and on the attest schema the handler checks, so a state outside the three is refused.
+test('the completion_gate item state enum takes passed, assumed, and unrelated', t => {
+  const svc = statusService(new Map())
+  t.after(() => cleanupService(svc))
+  assert.deepEqual([...svc.__tool.parameters.properties.items.items.properties.state.enum].sort(), ['assumed', 'passed', 'unrelated'])
 })
 
 // Retired surface (personal#dr0t). The tool has three actions, and no command runs a check.

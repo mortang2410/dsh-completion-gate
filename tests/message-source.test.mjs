@@ -91,7 +91,7 @@ test('the premature-stop follow-up carries the producer-owned source kind', asyn
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-test('the blocked-stop steer carries the producer-owned source kind', async t => {
+test('the advisory stop steer carries the producer-owned source kind', async t => {
   const repo = tempRepo(t)
   fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'probe', version: '1.0.0' }) + '\n')
   fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 2\n')
@@ -105,8 +105,8 @@ test('the blocked-stop steer carries the producer-owned source kind', async t =>
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-// The strict-mode error steer is the one emitter no other behavioural test reaches: the follow-up
-// and the blocked-stop steer each have a test above, and this branch runs only when the evaluator
+// The evaluation-error steer is the one emitter no other behavioural test reaches: the follow-up
+// and the advisory stop steer each have a test above, and this branch runs only when the evaluator
 // itself throws. An empty session cwd is such a failure, raised by the gate's own root(), so the
 // catch branch is exercised by a real error rather than by a stubbed run().
 test('the strict-mode evaluation-error steer carries the producer-owned source kind', async t => {
@@ -123,14 +123,14 @@ test('the strict-mode evaluation-error steer carries the producer-owned source k
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-// The control for the test above: the same failure under advisory mode steers no one, so the steer
-// it asserts can only come from the strict branch of that catch block.
-test('an advisory-mode evaluation error steers no one', async t => {
-  const svc = service({ settings: { mode: 'advisory' } })
+// The control for the test above: the same failure with a nudge limit of zero steers no one, so the steer
+// it asserts can only come from a limit above zero. The mode does not change the stop path.
+test('a zero nudge limit silences an evaluation-error steer', async t => {
+  const svc = service({ settings: { mode: 'strict', verificationNudgeLimit: 0 } })
   try {
     const agent = agentFor('')
     await svc.stopping({ agent, turn: 4, signal: new AbortController().signal })
-    assert.equal(agent.steers.length, 0, 'advisory mode must not steer on an evaluation failure')
+    assert.equal(agent.steers.length, 0, 'a zero nudge limit must send no evaluation-error steer')
     assert.equal(agent.followups.length, 0, 'an evaluation failure is not a premature stop, so it produces no follow-up')
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
@@ -145,6 +145,6 @@ test('every message emitter in lib/index.js uses the one producer-owned source',
   assert.ok(declared, 'lib/index.js declares no frozen SOURCE constant')
   assert.equal(declared[1], PRODUCER_KIND, `SOURCE declares the kind ${declared[1]}, which the host refuses or does not expect`)
   const uses = [...text.matchAll(/source: SOURCE/g)]
-  assert.equal(uses.length, 3, `expected the three message emitters to pass SOURCE, found ${uses.length}`)
+  assert.equal(uses.length, 2, `expected the two message emitters to pass SOURCE, found ${uses.length}`)
   assert.doesNotMatch(text, /kind: ['"]plugin['"]/, "lib/index.js still builds the refused bare 'plugin' kind")
 })

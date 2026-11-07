@@ -314,23 +314,21 @@ test('a turn keeps its attestation across repeated stops while its files and con
 
     publish(305)
     await svc.stopping({ agent, turn: 3, signal })
-    assert.equal(agent.steers.length, 1, 'stop 1 blocks until the change set is attested')
-    assert.match(agent.steers[0].content[0].text, /No completion attestation/)
+    assert.equal(agent.steers.length, 1, 'stop 1 sends one advisory message until the change set is attested')
+    assert.match(agent.steers[0].content[0].text, /Attestation: missing/)
 
     const attested = await svc.attest(agent, attestation)
     assert.equal(attested.pass, true, `attest failed: ${JSON.stringify(attested.blockers)}`)
 
     publish(307)
     await svc.stopping({ agent, turn: 3, signal })
-    assert.equal(agent.steers.length, 1, 'a repeated stop over an unchanged change set must not block again')
-    assert.equal(svc.state(agent).lastReport.pass, true)
-    assert.equal(svc.state(agent).lastReport.recordSeq, 307, 'the report names the record it was computed from')
+    assert.equal(agent.steers.length, 1, 'a repeated stop over an attested, unchanged change set must send nothing')
 
     fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 3\n')
     publish(309)
     await svc.stopping({ agent, turn: 3, signal })
-    assert.equal(agent.steers.length, 2, 'an edited file must invalidate the attestation')
-    assert.match(agent.steers[1].content[0].text, /No completion attestation/)
+    assert.equal(agent.steers.length, 2, 'an edited file must reopen the repository and send one message')
+    assert.match(agent.steers[1].content[0].text, /Attestation: stale/)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
@@ -376,8 +374,8 @@ test('a moved nested repository pointer changes the attestation identity and an 
     git(child, ['commit', '-qm', 'child B'])
     publish(63)
     await svc.stopping({ agent, turn: 5, signal })
-    assert.equal(agent.steers.length, 1, 'a moved nested repository pointer must invalidate the attestation')
-    assert.match(agent.steers[0].content[0].text, /No completion attestation/)
+    assert.equal(agent.steers.length, 1, 'a moved nested repository pointer must reopen the attestation and send one message')
+    assert.match(agent.steers[0].content[0].text, /Attestation: stale/)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
@@ -419,11 +417,10 @@ test('an ended turn with no change record reads as no changes: the stop check an
     // No workspace/changes event is observed for this turn: the recorder writes nothing for a turn that changed nothing.
 
     await svc.stopping({ agent, turn: 1, signal })
-    assert.equal(agent.steers.length, 0, 'the stop check passes an ended turn with no change record')
-    assert.equal(svc.state(agent).lastReport.pass, true, `stop check: ${JSON.stringify(svc.state(agent).lastReport.blockers)}`)
+    assert.equal(agent.steers.length, 0, 'the stop sends nothing for an ended turn with no change record')
 
     const forced = await svc.run(agent, signal, { force: true })
-    assert.equal(forced.pass, true, `/gate must report the stop check's result: ${JSON.stringify(forced.blockers)}`)
+    assert.equal(forced.pass, true, `/gate must pass an ended turn with no change record: ${JSON.stringify(forced.blockers)}`)
     assert.equal(forced.changesDetermined, true)
     assert.doesNotMatch(forced.blockers.join(' '), /not been written yet/, 'an ended turn must not report its record as not yet written')
     assert.deepEqual(svc.ledger.rowsFor('session-1'), [], 'a turn with no change record must not write a ledger row')
@@ -461,17 +458,17 @@ test('a turn that changed nothing reports its stop result once the turn has ende
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-test('a stop after a transient diff read failure rescans the same bytes and blocks on a new TODO', async t => {
+test('a stop after a transient diff read failure rescans the same bytes and names the credential the failed read hid', async t => {
   const repo = tempRepo(t)
-  fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 2\n// TODO: remove debug\n')
+  fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 2\npassword = "hunter2hunter2"\n')
   const changes = recorder()
   // The diff read fails once, at stop 1 only. Every later read succeeds.
   let failures = 1
   changes.diff = async () => {
     if (failures > 0) { failures -= 1; throw new Error('transient read failure') }
-    return { kind: 'text', hunks: [{ lines: ['-const value = 1', '+const value = 2', '+// TODO: remove debug'] }] }
+    return { kind: 'text', hunks: [{ lines: ['-const value = 1', '+const value = 2', '+password = "hunter2hunter2"'] }] }
   }
-  const svc = service({ workspaceChanges: changes, settings: { requireAttestation: false, requireTests: false } })
+  const svc = service({ workspaceChanges: changes })
   try {
     const agent = agentFor(repo)
     const signal = new AbortController().signal
@@ -483,21 +480,24 @@ test('a stop after a transient diff read failure rescans the same bytes and bloc
 
     publish(50)
     await svc.stopping({ agent, turn: 4, signal })
-    assert.equal(svc.state(agent).lastReport.diffGaps.length, 1, 'precondition: stop 1 recorded the failed diff read')
+    assert.equal(agent.steers.length, 1, 'stop 1 sends its advisory even though the diff read failed')
+    assert.doesNotMatch(agent.steers[0].content[0].text, /Possible hard-coded credential/, 'the failed read hides the credential, so stop 1 cannot name it')
 
-    // Same bytes, same listed file. The diff now reads, so the new TODO must be found.
+    // Same bytes, same listed file. The diff now reads, so the credential must be found.
     publish(52)
     await svc.stopping({ agent, turn: 4, signal })
-    assert.equal(agent.steers.length, 1, `stop 2 must rescan the same bytes and block on the TODO: ${agent.steers.at(-1)?.content[0].text}`)
-    assert.match(agent.steers[0].content[0].text, /TODO\/FIXME/)
+    assert.equal(agent.steers.length, 2, `stop 2 must rescan the same bytes and send a second message: ${agent.steers.at(-1)?.content[0].text}`)
+    const text = agent.steers[1].content[0].text
+    assert.match(text, /Possible hard-coded credential or secret/, 'stop 2 must name the credential the failed read hid')
+    assert.doesNotMatch(text, /hunter2/, 'the matched value must never be written into the message')
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-// A required check whose result depends on a file outside the change set. Its outcome changes
-// without any listed file changing, which is the environment-only fix this guards.
+// A test script that passes only once a file outside the change set exists, and that writes `ran` each time it
+// runs. The marker shows whether a stop or an attest started the script.
 function readyCheckRepo(t) {
   const repo = tempRepo(t)
-  fs.writeFileSync(path.join(repo, 'check.js'), "process.exit(require('fs').existsSync('ready') ? 0 : 1)\n")
+  fs.writeFileSync(path.join(repo, 'check.js'), "require('fs').writeFileSync('ran', 'x')\nprocess.exit(require('fs').existsSync('ready') ? 0 : 1)\n")
   fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'probe', version: '1.0.0', scripts: { test: 'node check.js' } }, null, 2) + '\n')
   fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 2\n')
   return repo
@@ -509,51 +509,43 @@ function publishReady(svc, seq) {
   svc.changeService().entries.set(`session-1:${seq}`, { turn: 2, cwd: svc.__repo, files: [file('app.js')], total: 1, added: 1, deleted: 0 })
 }
 
-test('a stop does not reuse a failing machine result, so an environment-only fix passes at the next stop', async t => {
+test('a stop runs no required check, so a failing check neither runs nor is named at any stop', async t => {
   const repo = readyCheckRepo(t)
-  const svc = service({ settings: { requireAttestation: false } })
+  const svc = service()
   svc.__repo = repo
   try {
     const agent = agentFor(repo)
     const signal = new AbortController().signal
     publishReady(svc, 40)
     await svc.stopping({ agent, turn: 2, signal })
-    assert.equal(agent.steers.length, 1, 'stop 1 blocks on the failing required check')
-    assert.match(agent.steers[0].content[0].text, /failed\./)
+    assert.equal(agent.steers.length, 1, 'stop 1 sends its advisory about the unclaimed file')
+    assert.doesNotMatch(agent.steers[0].content[0].text, /failed/, 'a stop must not name a check failure')
+    assert.equal(fs.existsSync(path.join(repo, 'ran')), false, 'stop 1 must not run the test script')
 
-    // Environment only: an ignored file outside the change set. The listed bytes are unchanged.
+    // The environment is fixed and the listed bytes are unchanged. The next stop still runs nothing.
     fs.writeFileSync(path.join(repo, 'ready'), '')
     publishReady(svc, 42)
     await svc.stopping({ agent, turn: 2, signal })
-    assert.equal(agent.steers.length, 1, `stop 2 must recompute the check and pass: ${agent.steers.at(-1)?.content[0].text}`)
-    const report = svc.state(agent).lastReport
-    assert.equal(report.pass, true, `unexpected blockers: ${JSON.stringify(report.blockers)}`)
-    assert.equal(report.checks.find(check => check.category === 'test').pass, true)
+    assert.equal(fs.existsSync(path.join(repo, 'ran')), false, 'stop 2 must not run the test script after the fix either')
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-test('attest starts no check and caches nothing, so the next stop runs the check itself', async t => {
+test('attest starts no check and caches nothing, and no stop runs the check', async t => {
   const repo = readyCheckRepo(t)
-  const svc = service({ settings: { requireAttestation: false } })
+  const svc = service()
   svc.__repo = repo
   try {
     const agent = agentFor(repo)
     const signal = new AbortController().signal
     publishReady(svc, 40)
-    assert.equal(fs.existsSync(path.join(repo, 'ready')), false, 'precondition: the required check fails without the ready file')
+    assert.equal(fs.existsSync(path.join(repo, 'ready')), false, 'precondition: the test script would fail without the ready file')
     await svc.attest(agent, { action: 'attest', repository_root: repo })
     assert.equal(svc.state(agent).cached.size, 0, 'attest caches no machine result')
     assert.equal(svc.state(agent).lastReport, null, 'attest records no check report')
+    assert.equal(fs.existsSync(path.join(repo, 'ran')), false, 'attest must not run the test script')
 
     await svc.stopping({ agent, turn: 2, signal })
-    assert.equal(agent.steers.length, 1, 'the stop runs the check, and the failing check blocks')
-    assert.match(agent.steers[0].content[0].text, /failed\./)
-
-    fs.writeFileSync(path.join(repo, 'ready'), '')
-    publishReady(svc, 42)
-    await svc.stopping({ agent, turn: 2, signal })
-    assert.equal(agent.steers.length, 1, `the stop after the fix must pass: ${agent.steers.at(-1)?.content[0].text}`)
-    assert.equal(svc.state(agent).lastReport.pass, true)
+    assert.equal(fs.existsSync(path.join(repo, 'ran')), false, 'the stop must not run the test script')
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
@@ -583,6 +575,7 @@ test('an unreadable nested HEAD blocks with the named message and passes once it
     const headFile = path.join(child, '.git', 'HEAD')
     const savedHead = fs.readFileSync(headFile, 'utf8')
     const named = /Nested repository nested: could not read nested HEAD; re-run \/gate\./
+    const stopNotice = /Nested repository nested: could not read its HEAD at this stop/
 
     // The nested pointer is a file of its own repository (a directory with a .git entry owns itself), so the attest
     // names the child root and the pointer is the child root itself: the path '.'.
@@ -603,9 +596,9 @@ test('an unreadable nested HEAD blocks with the named message and passes once it
     fs.writeFileSync(headFile, 'ref: refs/heads/missing-for-test\n')
     publish(62)
     await svc.stopping({ agent, turn: 5, signal })
-    assert.equal(agent.steers.length, 1, 'stop 2 blocks while the nested HEAD cannot be read')
-    assert.match(agent.steers[0].content[0].text, named)
-    assert.doesNotMatch(agent.steers[0].content[0].text, /No completion attestation/, 'an unreadable HEAD must not replace the identity of the path')
+    assert.equal(agent.steers.length, 1, 'stop 2 sends one notice while the nested HEAD cannot be read')
+    assert.match(agent.steers[0].content[0].text, stopNotice)
+    assert.doesNotMatch(agent.steers[0].content[0].text, /Attestation: (missing|stale)/, 'an unreadable HEAD must keep the identity of the path, so the attestation stays current')
 
     const during = await svc.run(agent, signal, { force: true })
     assert.equal(during.pass, false, '/gate during the failure window must block')
@@ -615,8 +608,7 @@ test('an unreadable nested HEAD blocks with the named message and passes once it
     fs.writeFileSync(headFile, savedHead)
     publish(63)
     await svc.stopping({ agent, turn: 5, signal })
-    assert.equal(agent.steers.length, 1, `stop 3 must pass once the nested HEAD reads again: ${agent.steers.at(-1)?.content[0].text}`)
-    assert.equal(svc.state(agent).lastReport.pass, true, `unexpected blockers: ${JSON.stringify(svc.state(agent).lastReport.blockers)}`)
+    assert.equal(agent.steers.length, 1, `stop 3 must send nothing once the nested HEAD reads again: ${agent.steers.at(-1)?.content[0].text}`)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
@@ -749,8 +741,8 @@ test('a moved nested pointer under a path containing a newline changes the attes
     assert.notEqual(await contentKey(repo, listed), `head:${headA}`, 'the moved pointer changes the key')
     publish(73)
     await svc.stopping({ agent, turn: 6, signal })
-    assert.equal(agent.steers.length, 1, 'a moved pointer under a newline path must block the next stop')
-    assert.match(agent.steers[0].content[0].text, /No completion attestation/)
+    assert.equal(agent.steers.length, 1, 'a moved pointer under a newline path must reopen the attestation and send one message')
+    assert.match(agent.steers[0].content[0].text, /Attestation: stale/)
 
     const forced = await svc.run(agent, signal, { force: true })
     assert.equal(forced.pass, false, '/gate must block a moved pointer under a newline path')

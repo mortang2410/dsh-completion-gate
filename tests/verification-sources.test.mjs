@@ -605,15 +605,18 @@ test('the temporary verifier refuses when a canonical check exists', async t => 
   assert.equal(fs.existsSync(script), true, 'a refused script is never deleted')
 })
 
-test('verification nudges are bounded per change record and the override still clears a block', async t => {
+test('verification nudges are bounded per change set, and the operator override still clears a blocking run', async t => {
   const cwd = tempDir(t)
   const svc = service(t, { cwd, settings: { verificationNudgeLimit: 2, requireTests: true, requireAttestation: true, mode: 'strict' } })
   announce(svc, 'session-1', 1, 10, [file('app.js')])
   const agent = agentFor(cwd)
   for (let i = 0; i < 3; i += 1) await svc.stopping({ agent, turn: 1, signal: new AbortController().signal })
-  assert.equal(agent.steers.length, 3)
-  assert.match(agent.steers[0].content[0].text, /COMPLETION GATE BLOCKED/)
-  assert.match(agent.steers[2].content[0].text, /STILL BLOCKED.*3 checks/s, 'past the bound the long instruction is not repeated')
+  // The limit of two allows two advisory messages on one change set, then the gate stays silent on it.
+  assert.equal(agent.steers.length, 2, 'the third stop on an unchanged change set must send nothing')
+  for (const steer of agent.steers) {
+    assert.match(steer.content[0].text, /Completion Gate advisory/)
+    assert.doesNotMatch(steer.content[0].text, /blocked|block/i, 'the advisory must not use blocking wording')
+  }
 
   const overridden = await svc.override(agent, 'operator reviewed')
   assert.equal(overridden.pass, true, 'the explicit human override still clears a block')

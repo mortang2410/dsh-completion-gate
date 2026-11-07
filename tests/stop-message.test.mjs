@@ -226,6 +226,8 @@ test('the message says it is advisory, nothing is stopped, and it never says BLO
   const text = steerText(agent.steers[0])
   assert.match(text, /advisory/i, 'the message must say it is advisory')
   assert.match(text, /nothing is stopped/i, 'the message must say nothing is stopped')
+  assert.match(text, /no project verification check ran/, 'the header must say no project verification check ran')
+  assert.doesNotMatch(text, /gate ran no check/, 'the header must not claim the gate ran no check')
   assert.doesNotMatch(text, /blocked|block/i, 'the message must not use blocking wording')
 })
 
@@ -289,6 +291,11 @@ test('a changed file in a repository with an unreadable catalog is named, and th
   assert.equal(agent.steers.length, 1)
   const text = steerText(agent.steers[0])
   assert.match(text, /Catalog unreadable/, 'an unreadable catalog must be named as unreadable')
+  assert.match(text, /cannot be read/, 'the introduction must say the catalog cannot be read')
+  assert.doesNotMatch(text, /Read it, adopt/, 'an unreadable catalog must not be told to read and adopt items')
+  const next = text.split('\n').find(line => line.startsWith('Next:'))
+  assert.ok(next, 'the message must carry a next step')
+  assert.match(next, /^Next: repair the verification catalog/, 'the next step must repair the catalog before any registration')
 })
 
 test('an absent host recorder gives one short undetermined message', async () => {
@@ -383,4 +390,132 @@ test('the stop runs no project check: a test script that writes a marker leaves 
   await stop(svc, agent)
   assert.equal(agent.steers.length, 1, 'the stop must still send its message')
   assert.equal(fs.existsSync(marker), false, 'the stop must not start the project test script')
+})
+
+test('an unchanged change set stays silent on a later turn once the bound is spent', async () => {
+  const repo = changedRepo('bound-turn')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent, 3)
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
+  for (let i = 0; i < 3; i += 1) await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 3, 'precondition: the bound of three is spent on turn 3')
+  begin(svc, agent, 4)
+  announce(svc, agent, { turn: 4, cwd: repo, files: ['app.js'] })
+  await stop(svc, agent, 4)
+  assert.equal(agent.steers.length, 3, 'the same files with the same bytes on a later turn must stay silent')
+})
+
+test('a message for 51 unfinished files names every file, the last one included', async () => {
+  const repo = tempRepo('many-files')
+  const files = Array.from({ length: 51 }, (_, i) => `file${i}.js`)
+  for (const file of files) fs.writeFileSync(path.join(repo, file), 'const x = 1\n')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent)
+  announce(svc, agent, { cwd: repo, files })
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 1)
+  const text = steerText(agent.steers[0])
+  const lines = text.split('\n')
+  const start = lines.findIndex(line => line.startsWith('Changed files not claimed yet'))
+  assert.ok(start >= 0, 'precondition: the message must list the unclaimed files')
+  const unclaimed = []
+  for (let i = start + 1; i < lines.length && lines[i].startsWith('- '); i += 1) unclaimed.push(lines[i])
+  assert.equal(unclaimed.length, 51, 'every unclaimed file must be listed, not summarized')
+  assert.ok(unclaimed.every(line => line.startsWith(`- ${repo}`)), 'every unclaimed line must be a path, with no count line')
+  assert.ok(unclaimed.some(line => line.endsWith('file50.js')), 'the last unclaimed file must be listed')
+})
+
+test('an item with no state reported is unfinished, not described as an unstated state', async () => {
+  const repo = changedRepo('unreported-item')
+  writeCatalog(repo, ['unit'])
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent)
+  announce(svc, agent, { cwd: repo, files: ['app.js'] })
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 1)
+  const text = steerText(agent.steers[0])
+  assert.match(text, /unit \(unit\): unfinished, no state reported yet/, 'an unreported item must read as unfinished')
+  assert.doesNotMatch(text, /no state stated yet/, 'the old wording must be gone')
+})
+
+test('a changed file whose added lines could not be read is named even when no credential hit exists', async () => {
+  const repo = changedRepo('gap-only')
+  writeCatalog(repo, ['unit'])
+  const changes = recorder()
+  changes.diff = async () => { throw new Error('transient read failure') }
+  const svc = service({ workspaceChanges: changes })
+  const agent = agentFor(repo)
+  begin(svc, agent)
+  announce(svc, agent, { cwd: repo, files: ['app.js'] })
+  const result = await svc.attest(agent, {
+    repository_root: repo,
+    claims: [{ path: 'app.js', decision: 'mine' }],
+    reviewed_code_files: ['app.js'],
+    items: [{ id: 'unit', state: 'passed' }],
+  })
+  assert.equal(result.pass, true, `precondition: the repository must be complete: ${result.problems.join(' | ')}`)
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 1, 'an unread file must send a message even when the repository is complete')
+  const text = steerText(agent.steers[0])
+  assert.match(text, /1 changed file could not be read for this scan/, 'the gap line must name the unread file')
+  assertAdvisory(text)
+})
+
+test('with the credential scan off, an unread file sends nothing when the repository is complete', async () => {
+  const repo = changedRepo('gap-scan-off')
+  writeCatalog(repo, ['unit'])
+  const changes = recorder()
+  changes.diff = async () => { throw new Error('transient read failure') }
+  const svc = service({ workspaceChanges: changes, settings: { securityScan: false } })
+  const agent = agentFor(repo)
+  begin(svc, agent)
+  announce(svc, agent, { cwd: repo, files: ['app.js'] })
+  const result = await svc.attest(agent, {
+    repository_root: repo,
+    claims: [{ path: 'app.js', decision: 'mine' }],
+    reviewed_code_files: ['app.js'],
+    items: [{ id: 'unit', state: 'passed' }],
+  })
+  assert.equal(result.pass, true, `precondition: the repository must be complete: ${result.problems.join(' | ')}`)
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 0, 'with no scan running, a gap must not claim that a scan was incomplete')
+})
+
+test('an attested nested repository whose HEAD becomes unreadable on a later stop with no change is named', async () => {
+  const repo = tempRepo('nested-later')
+  const child = path.join(repo, 'nested')
+  fs.mkdirSync(child)
+  git(child, ['init', '-q', '.'])
+  git(child, ['config', 'user.email', 'test@example.com'])
+  git(child, ['config', 'user.name', 'test'])
+  fs.writeFileSync(path.join(child, 'lib.js'), 'module.exports = 1\n')
+  git(child, ['add', '-A'])
+  git(child, ['commit', '-qm', 'child'])
+  writeCatalog(child, ['unit'])
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent, 1)
+  announce(svc, agent, { turn: 1, cwd: repo, files: [child] })
+  const result = await svc.attest(agent, {
+    repository_root: child,
+    claims: [{ path: '.', decision: 'mine' }],
+    reviewed_code_files: ['.'],
+    items: [{ id: 'unit', state: 'passed' }],
+  })
+  assert.equal(result.pass, true, `precondition: the nested repository must be complete: ${result.problems.join(' | ')}`)
+  await stop(svc, agent, 1)
+  assert.equal(agent.steers.length, 0, 'precondition: the attested nested repository is complete at its commit')
+  // Turn 2 ends with no change record. Git can no longer read the nested HEAD, and the pointer did not move.
+  begin(svc, agent, 2)
+  svc.publish(agent, 'turn/end', { turn: 2 })
+  fs.writeFileSync(path.join(child, '.git', 'HEAD'), 'ref: refs/heads/missing-for-test\n')
+  await stop(svc, agent, 2)
+  assert.equal(agent.steers.length, 1, 'a later stop must name the nested HEAD it could not read')
+  const text = steerText(agent.steers[0])
+  assert.match(text, /Nested repository .*: could not read its HEAD at this stop/, 'the notice must say the nested HEAD could not be read at this stop')
+  assert.ok(text.includes(child), 'the notice must name the nested repository by its path')
+  assertAdvisory(text)
 })

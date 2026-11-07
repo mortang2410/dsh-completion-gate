@@ -482,6 +482,7 @@ test('a stop after a transient diff read failure rescans the same bytes and name
     await svc.stopping({ agent, turn: 4, signal })
     assert.equal(agent.steers.length, 1, 'stop 1 sends its advisory even though the diff read failed')
     assert.doesNotMatch(agent.steers[0].content[0].text, /Possible hard-coded credential/, 'the failed read hides the credential, so stop 1 cannot name it')
+    assert.match(agent.steers[0].content[0].text, /1 changed file could not be read for this scan/, 'stop 1 must name the unread file, since no credential hit exists to carry it')
 
     // Same bytes, same listed file. The diff now reads, so the credential must be found.
     publish(52)
@@ -552,7 +553,7 @@ test('attest starts no check and caches nothing, and no stop runs the check', as
 // A nested repository whose HEAD cannot be read at one stop. The pointer does not move, so the gate must
 // block with the named message for that stop, and pass again once the HEAD reads. The unreadable read must
 // not replace the identity the path already had.
-test('an unreadable nested HEAD blocks with the named message and passes once it reads with the pointer unchanged', async t => {
+test('an unreadable nested HEAD is reported with the named message and passes once it reads with the pointer unchanged', async t => {
   const repo = tempRepo(t)
   const child = path.join(repo, 'nested')
   fs.mkdirSync(child)

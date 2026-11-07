@@ -174,7 +174,7 @@ test('attest refuses each malformed argument and each unknown path or item with 
     [attestArgs(session, { claims: [{ path: 'app.js', decision: 'mine' }, { path: 'app.js', decision: 'mine' }] }), /claims\[1\]\.path repeats app\.js\./],
     [attestArgs(session, { claims: [{ path: 'app.js', decision: 'mine', name: 'x' }] }), /claims\[0\] has an unknown key: name\./],
     [attestArgs(session, { claims: [{ path: 'missing.js', decision: 'mine' }] }), /missing\.js is not a changed file of this repository\./],
-    [attestArgs(session, { items: [{ id: 'unit', state: 'assumed' }] }), /items\[0\] is assumed, so it needs a reason\./],
+    [attestArgs(session, { items: [{ id: 'unit', state: 'assumed', reason: 5 }] }), /items\[0\]\.reason must be a string\./],
     [attestArgs(session, { items: [{ id: 'unit', state: 'passed', reason: 'ran it' }] }), /items\[0\] is passed, so it takes no reason\./],
     [attestArgs(session, { items: [{ id: 'unit', state: 'passed', name: 'Unit' }] }), /items\[0\] has an unknown key: name\./],
     [attestArgs(session, { items: [{ id: 'nope', state: 'passed' }] }), /nope is not an item in this repository's catalog\./],

@@ -538,13 +538,27 @@ test('a changed documentation file is a problem until docs_checked is true', asy
   assert.equal(checked.pass, true)
 })
 
-test('an assumed item without a reason is refused, and an assumed item with a reason is kept and shown', async t => {
+test('an assumed item without a reason is stored as unfinished and named as a problem, and a later reason clears the problem', async t => {
   const { session, svc, a } = await attestFixture(t)
   const claim = { claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'] }
-  await assert.rejects(svc.__tool.execute(attestArgs(session, { ...claim, items: [{ id: 'unit', state: 'assumed' }] }), execOf(a)), /items\[0\] is assumed, so it needs a reason\./)
+  const noReason = await svc.__tool.execute(attestArgs(session, { ...claim, items: [{ id: 'unit', state: 'assumed' }] }), execOf(a))
+  assert.equal(noReason.pass, false, noReason.markdown)
+  assert.ok(noReason.blockers.some(p => p.startsWith('unit is marked assumed but has no reason, so it stays unfinished.')), noReason.markdown)
+  const stored = await linesOf(svc, a)
+  assert.ok(stored.includes(`- ${path.join(session, 'app.js')} (mine)`), 'the claim of the same call is stored')
+  assert.ok(stored.includes('- unit: Unit | not stated'), 'the reasonless item is unfinished')
+  assert.ok(stored.includes('Status: unfinished'))
+
+  const passed = await svc.__tool.execute(attestArgs(session, { ...claim, items: [{ id: 'unit', state: 'passed' }] }), execOf(a))
+  assert.equal(passed.pass, true, passed.markdown)
+  const again = await svc.__tool.execute(attestArgs(session, { ...claim, items: [{ id: 'unit', state: 'assumed' }] }), execOf(a))
+  assert.equal(again.pass, false, again.markdown)
+  assert.ok((await linesOf(svc, a)).includes('- unit: Unit | not stated'), 'a reasonless assumed item clears the earlier passed state')
+
   const attested = await svc.__tool.execute(attestArgs(session, { ...claim, items: [{ id: 'unit', state: 'assumed', reason: 'The suite needs a database this session does not have.' }] }), execOf(a))
   assert.equal(attested.pass, true, attested.markdown)
-  assert.ok((await linesOf(svc, a)).includes('- unit: Unit | assumed, not run: The suite needs a database this session does not have.'), 'the reason is shown')
+  assert.deepEqual(attested.blockers, [])
+  assert.ok((await linesOf(svc, a)).includes('- unit: Unit | assumed, not run: The suite needs a database this session does not have.'), 'the reason is kept and shown')
 })
 
 test('a rejected file leaves the problems list, and an unclaimed file keeps the gate speaking', async t => {

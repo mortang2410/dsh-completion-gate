@@ -527,6 +527,75 @@ test('a claimed code file missing from the reviewed list is a problem, and the a
   assert.deepEqual(reviewed.blockers, [], 'reviewing the file clears the problem')
 })
 
+test('an unreadable nested repository elsewhere in the session does not block attesting a repository that reads', async t => {
+  const { session, svc, a, summaries } = await attestFixture(t)
+  const nested = path.join(session, 'nested')
+  fs.mkdirSync(nested)
+  execFileSync('git', ['init', '-q', '.'], { cwd: nested })
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: nested })
+  execFileSync('git', ['config', 'user.name', 'test'], { cwd: nested })
+  fs.writeFileSync(path.join(nested, 'lib.js'), 'module.exports = 1\n')
+  execFileSync('git', ['add', '-A'], { cwd: nested })
+  execFileSync('git', ['commit', '-qm', 'nested'], { cwd: nested })
+  // The HEAD is broken before the service reads it, so no earlier HEAD stands in for the nested path.
+  fs.writeFileSync(path.join(nested, '.git', 'HEAD'), 'ref: refs/heads/missing-for-test\n')
+  announceTurn(svc, a, summaries, 2, session, ['nested'])
+  const result = await svc.__tool.execute(completeAttest(session), execOf(a))
+  assert.equal(result.pass, true, result.markdown)
+  assert.deepEqual(result.blockers, [])
+})
+
+test('a refused attest changes nothing, even when a newer turn record is pending', async t => {
+  const { session, svc, a, summaries } = await attestFixture(t)
+  assert.equal((await svc.__tool.execute(completeAttest(session), execOf(a))).pass, true)
+  fs.writeFileSync(path.join(session, 'other.js'), 'x\n')
+  announceTurn(svc, a, summaries, 2, session, ['other.js'])
+  const before = JSON.stringify(svc.repositories.repositories(a.id))
+  const refusals = [
+    [attestArgs(attestRepo(), { claims: [] }), /is not a repository this session has changed/],
+    [attestArgs(session, { claims: [{ path: 'missing.js', decision: 'mine' }] }), /missing\.js is not a changed file of this repository/],
+  ]
+  for (const [args, expected] of refusals) {
+    await assert.rejects(svc.__tool.execute(args, execOf(a)), error => {
+      assert.match(error.message, expected)
+      assert.match(error.message, /Nothing was changed\./)
+      return true
+    })
+  }
+  assert.equal(JSON.stringify(svc.repositories.repositories(a.id)), before, 'a refused attest changes no claim, item state, or attestation')
+  const lines = await linesOf(svc, a)
+  assert.ok(lines.includes(`- ${path.join(session, 'other.js')} (unclaimed)`), 'the pending turn is filed by the next read')
+  assert.ok(lines.includes('Attestation: missing'), 'the next read drops the attestation, since a changed file reopens the repository')
+})
+
+test('a later attest that names only items replaces the reviewed list and docs check, and keeps the claims it does not name', async t => {
+  const { session, svc, a } = await attestFixture(t, ['app.js', 'other.js', 'NOTES.md'])
+  const first = await svc.__tool.execute(attestArgs(session, {
+    claims: [{ path: 'app.js', decision: 'mine' }, { path: 'other.js', decision: 'not-mine' }, { path: 'NOTES.md', decision: 'mine' }],
+    reviewed_code_files: ['app.js'], docs_checked: true, items: [{ id: 'unit', state: 'passed' }],
+  }), execOf(a))
+  assert.equal(first.pass, true, first.markdown)
+  const second = await svc.__tool.execute(attestArgs(session, { items: [{ id: 'unit', state: 'assumed', reason: 'x' }] }), execOf(a))
+  assert.deepEqual(second.blockers, [
+    `Claimed code files not reviewed: ${path.join(session, 'app.js')}.`,
+    `Changed documentation not checked: ${path.join(session, 'NOTES.md')}. Check each for staleness, bloat, and conflicting information, then attest with docs_checked true.`,
+  ])
+  const lines = await linesOf(svc, a)
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine)`), 'the earlier mine claim is kept')
+  assert.ok(lines.includes(`- ${path.join(session, 'other.js')} (not-mine)`), 'the earlier not-mine claim is kept')
+})
+
+test('two attest calls that overlap on one session both keep their claims', async t => {
+  const { session, svc, a } = await attestFixture(t, ['app.js', 'other.js'])
+  await Promise.all([
+    svc.__tool.execute(attestArgs(session, { claims: [{ path: 'app.js', decision: 'mine' }] }), execOf(a)),
+    svc.__tool.execute(attestArgs(session, { claims: [{ path: 'other.js', decision: 'not-mine' }] }), execOf(a)),
+  ])
+  const lines = await linesOf(svc, a)
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine)`), 'the claim from the first call survives the second call')
+  assert.ok(lines.includes(`- ${path.join(session, 'other.js')} (not-mine)`), 'the claim from the second call is stored')
+})
+
 test('a changed documentation file is a problem until docs_checked is true', async t => {
   const { session, svc, a } = await attestFixture(t, ['app.js', 'README.md'])
   const readme = path.join(session, 'README.md')

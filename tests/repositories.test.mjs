@@ -291,3 +291,18 @@ test('a second merge of one turn stays pending until the first filing settles', 
   assert.deepEqual(await Promise.all([first, second]), [true, false])
   assert.equal(repos.repositories('s1')[0].files.length, 1)
 })
+
+// A copy taken while a filing is in flight must file that turn itself. The filing writes into the tracker it started in,
+// so a copy that counted it as done would hold the turn with no files.
+test('a copy staged while a filing is in flight files that turn itself', async t => {
+  const repo = tempRepo(t)
+  const repos = new RepositoryTracker()
+  const gate = holdFirstGitLookup(t)
+  const args = { turn: 1, seq: 10, base: repo, files: ['app.js'], fallback: repo }
+  const first = repos.merge('s1', args)
+  const staged = repos.stage('s1')
+  gate.release()
+  assert.equal(await first, true)
+  assert.equal(await staged.merge('s1', args), true, 'the copy must file the turn, not count the in-flight filing as done')
+  assert.equal(staged.repositories('s1')[0].files.length, 1)
+})

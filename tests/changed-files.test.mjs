@@ -5,8 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { ChangeTracker, changeDigest, readTurnChanges } from '../lib/changes.js'
-import { addedLinesForRecord, projectRoot } from '../lib/runner.js'
-import { scanTodos } from '../lib/core.js'
+import { addedLinesForRecord, scanSecurity } from '../lib/core.js'
 
 // These tests drive the gate's own turn-scoped source through a fake recorder that mimics
 // the host `workspaceChanges` service: `summary(sessionId, seq)` is synchronous and returns
@@ -243,24 +242,11 @@ test('a covered session that changed nothing stays determined', () => {
   assert.deepEqual(record.files, [])
 })
 
-test('the project root is still located through git for running checks', async t => {
-  const repo = tempRepo(t)
-  const nested = path.join(repo, 'packages', 'inner')
-  fs.mkdirSync(nested, { recursive: true })
-  assert.equal(await projectRoot(nested), repo)
-})
-
 test('an added line that begins with two plus signs is still an added line', async () => {
   // The host's hunk lines keep their own prefix: '+' marks an added line, so this line is an
   // added line whose text begins with '++'.
-  const service = { async diff() { return { kind: 'text', hunks: [{ lines: [' let counter = 0', '+++counter; // TODO fix', '+let ok = 1'] }] } } }
+  const service = { async diff() { return { kind: 'text', hunks: [{ lines: [' let counter = 0', '+++eval(counter)', '+let ok = 1'] }] } } }
   const collected = await addedLinesForRecord(service, 'session-1', 5, 1, new AbortController().signal)
-  assert.deepEqual(collected.lines, ['++counter; // TODO fix', 'let ok = 1'])
-  assert.equal(scanTodos(collected.lines).length, 1, 'the TODO on the added line must be reported')
-})
-
-test('a working directory outside a repository is its own root', async t => {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cg-norepo-')))
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
-  assert.equal(await projectRoot(dir), dir)
+  assert.deepEqual(collected.lines, ['++eval(counter)', 'let ok = 1'])
+  assert.deepEqual(scanSecurity(collected.lines).map(hit => hit.id), ['eval'], 'the eval on the added line must be reported')
 })

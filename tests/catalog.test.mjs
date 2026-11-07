@@ -49,7 +49,6 @@ function gateFor(t, summaries = new Map()) {
   svc.start()
   svc.__listeners = listeners
   svc.__tool = tools.completion_gate
-  t.mock.method(svc, 'run', async () => { throw new Error('register must not start a check') })
   return svc
 }
 

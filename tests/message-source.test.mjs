@@ -77,7 +77,7 @@ function assertProducerOwned(message, where) {
 }
 
 test('the premature-stop follow-up carries the producer-owned source kind', async t => {
-  const svc = service({ settings: { autoDetectChecks: false, requireTests: false } })
+  const svc = service()
   try {
     const agent = agentFor(tempRepo(t))
     svc.publish(agent, 'turn/start', { turn: 11 })
@@ -108,13 +108,13 @@ test('the advisory stop steer carries the producer-owned source kind', async t =
 // The evaluation-error steer is the one emitter no other behavioural test reaches: the follow-up
 // and the advisory stop steer each have a test above, and this branch runs only when the evaluator
 // itself throws. An empty session cwd is such a failure, raised by the gate's own root(), so the
-// catch branch is exercised by a real error rather than by a stubbed run().
-test('the strict-mode evaluation-error steer carries the producer-owned source kind', async t => {
-  const svc = service({ settings: { mode: 'strict' } })
+// catch branch is exercised by a real error rather than by a stub.
+test('the evaluation-error steer carries the producer-owned source kind', async t => {
+  const svc = service()
   try {
     const agent = agentFor('')
     await svc.stopping({ agent, turn: 4, signal: new AbortController().signal })
-    assert.equal(agent.steers.length, 1, 'a strict-mode evaluation failure must produce exactly one steer')
+    assert.equal(agent.steers.length, 1, 'an evaluation failure must produce exactly one steer')
     const text = agent.steers[0].content.map(part => part.text).join('')
     assert.match(text, /could not evaluate the workspace/, 'the steer must be the evaluation-error notice, not the blocked-stop notice')
     assert.match(text, /requires session\.header\.cwd/, 'the steer must name the evaluator failure it hit')
@@ -124,9 +124,9 @@ test('the strict-mode evaluation-error steer carries the producer-owned source k
 })
 
 // The control for the test above: the same failure with a nudge limit of zero steers no one, so the steer
-// it asserts can only come from a limit above zero. The mode does not change the stop path.
+// it asserts can only come from a limit above zero.
 test('a zero nudge limit silences an evaluation-error steer', async t => {
-  const svc = service({ settings: { mode: 'strict', verificationNudgeLimit: 0 } })
+  const svc = service({ settings: { verificationNudgeLimit: 0 } })
   try {
     const agent = agentFor('')
     await svc.stopping({ agent, turn: 4, signal: new AbortController().signal })

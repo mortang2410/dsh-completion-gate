@@ -1,4 +1,32 @@
-import test from 'node:test';import assert from 'node:assert/strict';import{resolveConfig,scanTodos,scanSecurity,evaluateAttestation,normalizeAttestation}from'../lib/core.js'
-test('hotfix defaults are safe',()=>{const c=resolveConfig({});assert.equal(c.gateSubagents,false);assert.equal(c.preventPrematureStops,true);assert.equal(c.prematureStopMaxContinuations,3)})
-test('scanners work',()=>{assert.equal(scanTodos(['// TODO x']).length,1);assert.equal(scanSecurity(['const password = "123456789"']).length,1)})
-test('attestation is fingerprint bound',()=>{const a=normalizeAttestation({reviewed_files:['a'],review_summary:'reviewed',acceptance_criteria:[{criterion:'x',evidence:'test'}],unresolved_issues:[]},'fp');assert.equal(evaluateAttestation(a,['a'],'fp').pass,true);assert.equal(evaluateAttestation(a,['a'],'other').pass,false)})
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { DEFAULT_CONFIG, resolveConfig, scanSecurity, addedLinesFromDiff } from '../lib/core.js'
+
+test('hotfix defaults are safe', () => {
+  const c = resolveConfig({})
+  assert.equal(c.gateSubagents, false)
+  assert.equal(c.preventPrematureStops, true)
+  assert.equal(c.prematureStopMaxContinuations, 3)
+})
+
+test('resolveConfig clamps the numeric keys into their ranges', () => {
+  const c = resolveConfig({ maxChangedFiles: 1, verificationNudgeLimit: 99, prematureStopMaxContinuations: -4 })
+  assert.equal(c.maxChangedFiles, 10)
+  assert.equal(c.verificationNudgeLimit, 20)
+  assert.equal(c.prematureStopMaxContinuations, 0)
+})
+
+test('resolveConfig takes a boolean as given and falls back to the default for anything else', () => {
+  assert.equal(resolveConfig({ securityScan: false }).securityScan, false)
+  assert.equal(resolveConfig({ securityScan: 'no' }).securityScan, DEFAULT_CONFIG.securityScan)
+})
+
+test('scanSecurity names a hard-coded credential on its line and passes clean code', () => {
+  const hits = scanSecurity(['const password = "123456789"', 'const value = 1'])
+  assert.deepEqual(hits.map(hit => [hit.id, hit.line]), [['hardcoded-secret', 1]])
+  assert.equal(scanSecurity(['const value = 1']).length, 0)
+})
+
+test('addedLinesFromDiff keeps only added lines and strips exactly one prefix character', () => {
+  assert.deepEqual(addedLinesFromDiff(' context\n-removed\n+added\n+++two plus\n'), ['added', '++two plus'])
+})

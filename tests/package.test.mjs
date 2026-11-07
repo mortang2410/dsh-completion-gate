@@ -6,9 +6,9 @@ const root = new URL('../', import.meta.url)
 
 test('source release is dependency-free and complete', () => {
   const pkg = JSON.parse(fs.readFileSync(new URL('package.json', root), 'utf8'))
-  assert.equal(pkg.version, '0.1.3')
+  assert.equal(pkg.version, '0.2.0')
   assert.deepEqual(pkg.dependencies ?? {}, {})
-  for (const file of ['lib/index.js', 'lib/core.js', 'lib/runner.js', 'lib/settings.js', 'lib/client.js', 'lib/changes.js', 'lib/ledger.js', 'lib/recipe.js', 'lib/recipe-runner.js', 'lib/verification.js', 'cordis.patch.yml']) {
+  for (const file of ['lib/index.js', 'lib/core.js', 'lib/settings.js', 'lib/client.js', 'lib/changes.js', 'lib/report.js', 'lib/repositories.js', 'lib/tracker.js', 'lib/catalog.js', 'cordis.patch.yml']) {
     assert.equal(fs.existsSync(new URL(file, root)), true, `missing released file: ${file}`)
   }
   assert.equal(pkg.files.includes('src'), false, 'the removed duplicate tree is still published')
@@ -26,17 +26,18 @@ test('every package entry point resolves inside the loaded tree', () => {
 
 test('control center exposes persistent editable settings', () => {
   const text = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  for (const marker of ['Save settings', 'Reset to profile defaults', 'Require tests', 'Premature-stop guard', 'Custom checks', 'Gate subagents']) {
+  for (const marker of ['Save settings', 'Reset to profile defaults', 'Premature-stop guard', 'Gate subagents', 'Security regression scan', 'Maximum changed files', 'Verification nudge limit']) {
     assert.equal(text.includes(marker), true, `missing UI marker: ${marker}`)
   }
   assert.equal(text.includes("api('/settings'"), true)
   assert.equal(text.includes("api('/settings/reset'"), true)
 })
 
-test('control center shows and configures the verification sources', () => {
-  const text = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  for (const marker of ['Chosen verification source', 'Detected recipe', 'Saved recipe', 'Canonical checks', 'Temporary verifier', 'Auto-detect a recipe', 'Allow the temporary verifier', 'Readiness timeout', 'Verification nudge limit']) {
-    assert.equal(text.includes(marker), true, `missing verification UI marker: ${marker}`)
+test('the check script syntax-checks every surviving lib file', () => {
+  const pkg = JSON.parse(fs.readFileSync(new URL('package.json', root), 'utf8'))
+  const libFiles = fs.readdirSync(new URL('lib/', root)).filter(name => name.endsWith('.js'))
+  for (const file of libFiles) {
+    assert.ok(pkg.scripts.check.includes(`lib/${file}`), `npm run check does not syntax-check lib/${file}`)
   }
 })
 

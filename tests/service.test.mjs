@@ -22,7 +22,7 @@ test('subagents are skipped by default',()=>{const s=service(ctx,{});const a=age
 test('root agents are gated',()=>{const s=service(ctx,{});assert.equal(s.applies(agent()),true)})
 
 test('turn-stopping schedules a fresh follow-up for screenshot-style unfinished root turn',async()=>{
- const svc=liveService({autoDetectChecks:false,requireTests:false});const a=agent();
+ const svc=liveService();const a=agent();
  emit(svc,a,'turn/start',{turn:11});
  emit(svc,a,'assistant/message',{turn:11,message:{content:[{type:'text',text:'Now I need the call site to see where each value comes from, and in parallel start the Exa research you asked for.'}]}});
  emit(svc,a,'tool/call',{turn:11,name:'grep'});
@@ -43,9 +43,17 @@ test('turn-stopping leaves subagent lifecycle untouched by default',async()=>{
 })
 
 
-test('operator settings persist, apply live, and reset to profile defaults',()=>{const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cg-settings-live-'));try{const file=path.join(dir,'settings.json');const first=new CompletionGateService(ctx,{mode:'strict',gateSubagents:false},{settingsPath:file});first.updateSettings({mode:'advisory',gateSubagents:true,requireTests:false});assert.equal(first.config.mode,'advisory');assert.equal(first.config.gateSubagents,true);const second=new CompletionGateService(ctx,{mode:'strict',gateSubagents:false},{settingsPath:file});assert.equal(second.config.mode,'advisory');assert.equal(second.config.requireTests,false);second.resetSettings();assert.equal(second.config.mode,'strict');assert.equal(second.config.gateSubagents,false);assert.equal(fs.existsSync(file),false)}finally{fs.rmSync(dir,{recursive:true,force:true})}})
+test('operator settings persist, apply live, and reset to profile defaults',()=>{const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cg-settings-live-'));try{const file=path.join(dir,'settings.json');const first=new CompletionGateService(ctx,{gateSubagents:false},{settingsPath:file});first.updateSettings({gateSubagents:true,maxChangedFiles:400});assert.equal(first.config.gateSubagents,true);assert.equal(first.config.maxChangedFiles,400);const second=new CompletionGateService(ctx,{gateSubagents:false},{settingsPath:file});assert.equal(second.config.gateSubagents,true);assert.equal(second.config.maxChangedFiles,400);second.resetSettings();assert.equal(second.config.gateSubagents,false);assert.equal(second.config.maxChangedFiles,500);assert.equal(fs.existsSync(file),false)}finally{fs.rmSync(dir,{recursive:true,force:true})}})
 
-test('changing policy invalidates cached evidence, attestations, and overrides',()=>{const s=service(ctx,{});try{const state=s.state(agent());state.cached.set('fp',{pass:true});state.attestation={fingerprint:'fp'};state.override={fingerprint:'fp'};state.lastReport={pass:true};s.updateSettings({securityScan:false});assert.equal(state.cached.size,0);assert.equal(state.attestation,null);assert.equal(state.override,null);assert.equal(state.lastReport,null)}finally{cleanupService(s)}})
+test('updateSettings keeps this session claims and attestation; only stop bookkeeping restarts', async t => {
+  const { session, svc, a } = await attestFixture(t)
+  await svc.__tool.execute(completeAttest(session), execOf(a))
+  svc.updateSettings({ maxChangedFiles: 400 })
+  assert.equal(svc.config.maxChangedFiles, 400, 'precondition: the setting applied')
+  const lines = await linesOf(svc, a)
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine)`), 'the claim survives a settings change')
+  assert.ok(lines.includes('Attestation: current'), 'the attestation survives a settings change')
+})
 
 async function apiCall(service, method, url, body) {
   const { Readable } = await import('node:stream')
@@ -63,23 +71,23 @@ test('settings API saves live policy and reset endpoint restores profile default
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-api-settings-'))
   try {
     const file = path.join(dir, 'settings.json')
-    const svc = new CompletionGateService(ctx, { mode: 'strict', requireTests: true }, { settingsPath: file })
-    let response = await apiCall(svc, 'POST', '/api/completion-gate/v1/settings', { settings: { mode: 'advisory', requireTests: false } })
+    const svc = new CompletionGateService(ctx, { gateSubagents: false, maxChangedFiles: 500 }, { settingsPath: file })
+    let response = await apiCall(svc, 'POST', '/api/completion-gate/v1/settings', { settings: { gateSubagents: true, maxChangedFiles: 400 } })
     assert.equal(response.status, 200)
-    assert.equal(response.body.settings.mode, 'advisory')
-    assert.equal(response.body.settings.requireTests, false)
+    assert.equal(response.body.settings.gateSubagents, true)
+    assert.equal(response.body.settings.maxChangedFiles, 400)
     assert.equal(fs.existsSync(file), true)
     response = await apiCall(svc, 'POST', '/api/completion-gate/v1/settings/reset', {})
     assert.equal(response.status, 200)
-    assert.equal(response.body.settings.mode, 'strict')
-    assert.equal(response.body.settings.requireTests, true)
+    assert.equal(response.body.settings.gateSubagents, false)
+    assert.equal(response.body.settings.maxChangedFiles, 500)
     assert.equal(fs.existsSync(file), false)
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })
 
 
 test('empty recovery turn is retried with another bounded follow-up',async()=>{
- const svc=liveService({autoDetectChecks:false,requireTests:false,prematureStopMaxContinuations:3})
+ const svc=liveService({prematureStopMaxContinuations:3})
  const a=agent()
  emit(svc,a,'assistant/message',{turn:1,message:{content:[{type:'text',text:'Now I need to inspect the call site.'}]}})
  await svc.stopping({agent:a,turn:1,signal:new AbortController().signal})
@@ -88,27 +96,6 @@ test('empty recovery turn is retried with another bounded follow-up',async()=>{
  await svc.stopping({agent:a,turn:2,signal:new AbortController().signal})
  assert.equal(a.followups.length,2)
  assert.match(a.followups[1].content[0].text,/returned no useful assistant content/)
-})
-
-test('an out-of-range port is refused before any phase runs or any probe is sent', async () => {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cg-port-')))
-  const s = service(ctx, {})
-  try {
-    // The start command writes a marker, so the marker exists only if the start phase ran.
-    const marker = path.join(dir, 'started')
-    fs.mkdirSync(path.join(dir, '.dsh'))
-    const start = `node -e "require('fs').writeFileSync('${marker}','x')"`
-    fs.writeFileSync(path.join(dir, '.dsh', 'environment.json'), JSON.stringify({ version: 1, recipe: { name: 'port-check', kind: 'node', start, port: 8000 } }))
-    for (const port of [70000, -1, 3000.5, 0]) {
-      const outcome = await s.recipe(agent([], { cwd: dir }), { port })
-      assert.equal(outcome.ok, false, `port ${port} was accepted`)
-      assert.match(outcome.blockers.join(' '), /port must be an integer from 1 to 65535/, `port ${port} was refused without a port reason`)
-      assert.equal(fs.existsSync(marker), false, `port ${port} launched the start command before it was refused`)
-    }
-  } finally {
-    cleanupService(s)
-    fs.rmSync(dir, { recursive: true, force: true })
-  }
 })
 
 test('normal recovery response clears the continuation chain',()=>{
@@ -165,7 +152,7 @@ test('revert: the widened first-person forms no longer block',()=>{const widened
 test('revert: the pre-loop pending-work patterns still block',()=>{const blocking=["Now I need the call site, and in parallel start the Exa research.","Next I will inspect the call site.","I'll check the output.","Let me run the tests.","Still need to run the tests.","I need to run the tests again.","The fix is in place, and in parallel start the lint run."];for(const text of blocking){const svc=liveService();const a=agent();finalTurn(svc,a,1,[{type:'text',text}],{tool:true});assert.ok(svc.premature(a,1),`the guard must still fire: ${text}`)}})
 
 // Repositories section of the status action. A stub host carries a change recorder and captures the tool the gate
-// registers, so a test can call its execute. Status must never start a check, so each test spies on the run seam.
+// registers, so a test can call its execute.
 // Test workspaces live under the task's Trash root, never the system temporary directory (AGENTS.md).
 const workRoot=path.join(os.homedir(),'Trash','3t34-tests')
 function makeWorkDir(prefix){fs.mkdirSync(workRoot,{recursive:true});return fs.realpathSync(fs.mkdtempSync(path.join(workRoot,prefix)))}
@@ -194,51 +181,27 @@ test('status lists every repository the session changed, each with its catalog p
   }
 })
 
-// A check runs only through run(). The spy throws instead of calling through, so a status that reached a check
-// fails here and no check executes.
-test('status starts no check: the run seam is never called', async t => {
+// The status action returns the session report as markdown.
+test('status returns the session report', async t => {
   const session = tempGitRepo(t)
   const summaries = new Map()
   const svc = statusService(summaries)
   t.after(() => cleanupService(svc))
-  const run = t.mock.method(svc, 'run', async () => { throw new Error('status must not call run') })
   const a = agent([], { cwd: session })
   announceTurn(svc, a, summaries, 1, session, ['app.js'])
   const result = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
-  assert.equal(run.mock.callCount(), 0)
-  assert.equal(result.pass, null, 'status with no earlier run reports no machine result')
-  assert.match(result.markdown, /status executes none/)
+  assert.match(result.markdown, /^# Completion Gate/)
+  assert.doesNotMatch(result.markdown, /PASS|BLOCKED/, 'the status report carries no machine verdict')
 })
 
-test('the gate-status command shows the repositories and starts no check', async t => {
+test('the gate-status command shows the repositories', async t => {
   const session = tempGitRepo(t)
   const summaries = new Map()
   const svc = statusService(summaries)
   t.after(() => cleanupService(svc))
-  const run = t.mock.method(svc, 'run', async () => { throw new Error('gate-status must not call run') })
   const a = agent([], { cwd: session })
   announceTurn(svc, a, summaries, 1, session, ['app.js'])
   const result = await svc.__commands['gate-status'].handler({ agent: a, rawInput: '' })
-  assert.equal(result.kind, 'success')
-  assert.equal(run.mock.callCount(), 0)
-  const lines = result.text.split('\n')
-  assert.ok(lines.includes(`Root: ${session}`), result.text)
-  assert.ok(lines.includes(`Catalog: ${path.join(session, '.dsh', 'verification.json')}`), `missing catalog line: ${result.text}`)
-  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed)`), `missing file line: ${result.text}`)
-})
-
-// The spec says /gate and /gate-status show the same report, so /gate carries the repositories section as status does.
-// The check seam is stubbed with a fixed report, so no project check runs.
-test('the gate command shows the repositories section too, as the status command does', async t => {
-  const session = tempGitRepo(t)
-  const summaries = new Map()
-  const svc = statusService(summaries)
-  t.after(() => cleanupService(svc))
-  const run = t.mock.method(svc, 'run', async () => ({ pass: true, turn: 1, recordSeq: 1, workspaceLabel: 'test', checks: [], blockers: [] }))
-  const a = agent([], { cwd: session })
-  announceTurn(svc, a, summaries, 1, session, ['app.js'])
-  const result = await svc.__commands.gate.handler({ agent: a, rawInput: '' })
-  assert.equal(run.mock.callCount(), 1)
   assert.equal(result.kind, 'success')
   const lines = result.text.split('\n')
   assert.ok(lines.includes(`Root: ${session}`), result.text)
@@ -252,9 +215,8 @@ test('status fixtures keep their settings directory under the task root, not the
   assert.ok(svc.__testSettingsDir.startsWith(`${workRoot}${path.sep}`), `settings directory ${svc.__testSettingsDir} is outside ${workRoot}`)
 })
 
-// Characterization, not a red test: the comment that said no git process starts was false, and this pins the status
-// path for a changed nested repository, which reads that repository's HEAD through git. The run seam must stay unused.
-test('a changed nested repository is read by status without starting a check', async t => {
+// Characterization: this pins the status path for a changed nested repository, which reads that repository's HEAD through git.
+test('a changed nested repository is read by status', async t => {
   const session = tempGitRepo(t)
   const nested = path.join(session, 'vendor')
   fs.mkdirSync(nested)
@@ -262,11 +224,9 @@ test('a changed nested repository is read by status without starting a check', a
   const summaries = new Map()
   const svc = statusService(summaries)
   t.after(() => cleanupService(svc))
-  const run = t.mock.method(svc, 'run', async () => { throw new Error('status must not call run') })
   const a = agent([], { cwd: session })
   announceTurn(svc, a, summaries, 1, session, ['vendor'])
   const result = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
-  assert.equal(run.mock.callCount(), 0)
   assert.ok(result.markdown.includes(`Root: ${nested}`), result.markdown)
 })
 
@@ -426,25 +386,6 @@ test('a repository that cannot be read is named in status, and the next status r
   assert.ok(second.markdown.includes(`Root: ${session}`), 'the next status must read the turn again')
 })
 
-test('status with an earlier machine result keeps that result, adds the repositories after it, and starts no check', async t => {
-  const session = tempGitRepo(t)
-  const summaries = new Map()
-  const svc = statusService(summaries)
-  t.after(() => cleanupService(svc))
-  const run = t.mock.method(svc, 'run', async () => { throw new Error('status must not call run') })
-  const a = agent([], { cwd: session })
-  svc.state(a).lastReport = { pass: false, fingerprint: 'fp-earlier', blockers: ['earlier blocker'], workspaceLabel: 'session', turn: 1, recordSeq: 5, checks: [], changedFiles: [] }
-  announceTurn(svc, a, summaries, 1, session, ['app.js'])
-  const result = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
-  assert.equal(run.mock.callCount(), 0)
-  assert.equal(result.pass, false)
-  assert.equal(result.fingerprint, 'fp-earlier')
-  assert.deepEqual(result.blockers, ['earlier blocker'])
-  assert.match(result.markdown, /BLOCKED/)
-  assert.ok(result.markdown.indexOf('## Repositories') > result.markdown.indexOf('## Blocking reasons'), 'the repositories section follows the earlier report')
-  assert.ok(result.markdown.includes(`Root: ${session}`))
-})
-
 // The catalog section of status: each repository's items, one line per item. The item line format is fixed here:
 // "- <id>: <name> | Proves: <proves> | Command: <command or none>".
 test('status lists the catalog items of two repositories', async t => {
@@ -453,13 +394,11 @@ test('status lists the catalog items of two repositories', async t => {
   const summaries = new Map()
   const svc = statusService(summaries)
   t.after(() => cleanupService(svc))
-  const run = t.mock.method(svc, 'run', async () => { throw new Error('register and status must not call run') })
   const a = agent([], { cwd: session })
   announceTurn(svc, a, summaries, 1, session, ['app.js', path.join(sibling, 'app.js')])
   await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Lint', proves: 'No lint errors.' }] }, { agent: a, signal: new AbortController().signal })
   await svc.__tool.execute({ action: 'register', repository_root: sibling, items: [{ name: 'Smoke', proves: 'It starts.', command: 'node smoke.js' }] }, { agent: a, signal: new AbortController().signal })
   const result = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
-  assert.equal(run.mock.callCount(), 0)
   const lines = result.markdown.split('\n')
   assert.ok(lines.includes('- lint: Lint | Proves: No lint errors. | Command: none'), result.markdown)
   assert.ok(lines.includes('- smoke: Smoke | Proves: It starts. | Command: node smoke.js'), result.markdown)
@@ -474,21 +413,18 @@ test('status says a repository has no catalog yet, and names an unreadable catal
   const summaries = new Map()
   const svc = statusService(summaries)
   t.after(() => cleanupService(svc))
-  const run = t.mock.method(svc, 'run', async () => { throw new Error('status must not call run') })
   const a = agent([], { cwd: session })
   announceTurn(svc, a, summaries, 1, session, ['app.js', path.join(broken, 'app.js')])
   fs.mkdirSync(path.join(broken, '.dsh'))
   fs.writeFileSync(path.join(broken, '.dsh', 'verification.json'), '{"version": 1,')
   const result = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
-  assert.equal(run.mock.callCount(), 0)
   assert.match(result.markdown, /No catalog exists yet/)
   assert.match(result.markdown, /Catalog unreadable, so its items are not listed: the file is not valid JSON/)
   assert.doesNotMatch(result.markdown, /Catalog readable, with no items yet/, 'an unreadable catalog is never shown as readable and empty')
 })
 
 // The attest action, driven through the tool the gate registers, so the schema, the root rule, the problem list (the tool's
-// blockers), and the status report are the ones a model sees. The fixture registers one catalog item, 'unit'. Its run seam
-// throws, so an attest that starts a check fails the test. No tool event is emitted: a claim is believed as reported.
+// blockers), and the status report are the ones a model sees. The fixture registers one catalog item, 'unit'. No tool event is emitted: a claim is believed as reported.
 // These fixtures are never deleted by a test: attestRepo makes no t.after removal, as AGENTS.md requires.
 function attestRepo() {
   const dir = makeWorkDir('attest-')
@@ -506,7 +442,6 @@ async function attestFixture(t, files = ['app.js']) {
   const summaries = new Map()
   const svc = statusService(summaries)
   t.after(() => cleanupService(svc))
-  t.mock.method(svc, 'run', async () => { throw new Error('attest and status must not call run') })
   const a = agent([], { cwd: session })
   announceTurn(svc, a, summaries, 1, session, files)
   await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Unit', proves: 'app.js sets value' }] }, execOf(a))
@@ -748,7 +683,6 @@ test('an outer repository whose only changed file moves into a nested repository
   const summaries = new Map()
   const svc = statusService(summaries)
   t.after(() => cleanupService(svc))
-  t.mock.method(svc, 'run', async () => { throw new Error('attest and status must not call run') })
   const a = agent([], { cwd: session })
   announceTurn(svc, a, summaries, 1, session, ['pkg/source.js'])
   const attested = await svc.__tool.execute(attestArgs(session, { claims: [{ path: 'pkg/source.js', decision: 'mine' }], reviewed_code_files: ['pkg/source.js'], items: [] }), execOf(a))
@@ -773,7 +707,6 @@ test('an emptied outer repository that still has catalog items keeps its missing
   const summaries = new Map()
   const svc = statusService(summaries)
   t.after(() => cleanupService(svc))
-  t.mock.method(svc, 'run', async () => { throw new Error('attest and status must not call run') })
   const a = agent([], { cwd: session })
   announceTurn(svc, a, summaries, 1, session, ['pkg/source.js'])
   await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Unit', proves: 'source.js sets value' }] }, execOf(a))
@@ -803,4 +736,119 @@ test('the completion_gate tool takes claims, reviewed_code_files, docs_checked, 
   const properties = svc.__tool.parameters.properties
   for (const key of ['claims', 'reviewed_code_files', 'docs_checked', 'summary', 'items', 'repository_root']) assert.ok(properties[key], `the schema takes ${key}`)
   for (const key of ['acceptance_criteria', 'unresolved_issues', 'reviewed_files', 'review_summary']) assert.equal(properties[key], undefined, `the schema no longer takes ${key}`)
+})
+
+// Retired surface (personal#dr0t). The tool has three actions, and no command runs a check.
+
+test('the completion_gate action enum is exactly register, attest, and status', t => {
+  const svc = statusService(new Map())
+  t.after(() => cleanupService(svc))
+  assert.deepEqual([...svc.__tool.parameters.properties.action.enum].sort(), ['attest', 'register', 'status'])
+})
+
+test('an old action name errors, names the three allowed actions, and changes nothing', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  const before = JSON.stringify(await linesOf(svc, a))
+  for (const action of ['run', 'recipe', 'temporary_verify']) {
+    await assert.rejects(() => svc.__tool.execute({ action }, execOf(a)), /register.*attest.*status/s, `${action} must name the three actions`)
+  }
+  assert.equal(JSON.stringify(await linesOf(svc, a)), before, 'an old action changed the session')
+})
+
+test('the gate-override command is not registered', t => {
+  const svc = statusService(new Map())
+  t.after(() => cleanupService(svc))
+  assert.equal(svc.__commands['gate-override'], undefined)
+})
+
+test('the gate command shows the session report', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  const result = await svc.__commands.gate.handler({ agent: a, rawInput: '' })
+  assert.equal(result.kind, 'success')
+  assert.ok(result.text.split('\n').includes(`- ${path.join(session, 'app.js')} (unclaimed)`), result.text)
+  assert.doesNotMatch(result.text, /PASS|BLOCKED|No check has run|Machine evidence/)
+})
+
+test('the session report has no machine verdict, no machine-check table, and no "No check has run" wording', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  const result = await svc.__tool.execute({ action: 'status' }, execOf(a))
+  assert.doesNotMatch(result.markdown, /PASS|BLOCKED|No check has run|Machine evidence|\| Check \|/)
+})
+
+test('gate-reset clears this session claims and leaves the repository catalog and files alone', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Unit', proves: 'app.js sets value' }] }, execOf(a))
+  await svc.__tool.execute(attestArgs(session, { claims: [{ path: 'app.js', decision: 'mine' }] }), execOf(a))
+  const catalog = path.join(session, '.dsh', 'verification.json')
+  const catalogBefore = fs.readFileSync(catalog, 'utf8')
+  const fileBefore = fs.readFileSync(path.join(session, 'app.js'), 'utf8')
+  assert.ok((await linesOf(svc, a)).includes(`- ${path.join(session, 'app.js')} (mine)`), 'precondition: the claim is recorded')
+  await svc.__commands['gate-reset'].handler({ agent: a, rawInput: '' })
+  const lines = await linesOf(svc, a)
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed)`), 'the reset must drop this session claim')
+  assert.equal(fs.readFileSync(catalog, 'utf8'), catalogBefore, 'the reset must not touch the catalog')
+  assert.equal(fs.readFileSync(path.join(session, 'app.js'), 'utf8'), fileBefore, 'the reset must not touch the files')
+})
+
+test('the stop hook sends one advisory steer for an unclaimed change', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  await svc.stopping({ agent: a, turn: 1, signal: new AbortController().signal })
+  assert.equal(a.steers.length, 1, 'the unclaimed change is advised once')
+})
+
+// No check runs, so the only process starts left in lib are the git discovery calls: child_process is imported by
+// lib/changes.js and lib/catalog.js alone, and every command either of them starts is git.
+test('only lib/changes.js and lib/catalog.js start a process, and each one starts only git', () => {
+  const lib = fileURLToPath(new URL('../lib/', import.meta.url))
+  const importers = []
+  for (const name of fs.readdirSync(lib)) {
+    if (!name.endsWith('.js')) continue
+    const text = fs.readFileSync(path.join(lib, name), 'utf8')
+    if (/['"](?:node:)?child_process['"]/.test(text)) importers.push(name)
+    for (const match of text.matchAll(/execFileP\(\s*['"]([^'"]+)['"]/g)) assert.equal(match[1], 'git', `${name} starts ${match[1]}, not git`)
+  }
+  assert.deepEqual(importers.sort(), ['catalog.js', 'changes.js'])
+})
+
+test('the execution modules are deleted from lib', () => {
+  const lib = fileURLToPath(new URL('../lib/', import.meta.url))
+  for (const file of ['runner.js', 'recipe.js', 'recipe-runner.js', 'verification.js', 'ledger.js']) {
+    assert.equal(fs.existsSync(path.join(lib, file)), false, `${file} still exists`)
+  }
+})
+
+test('no source file imports a removed execution module', () => {
+  const lib = fileURLToPath(new URL('../lib/', import.meta.url))
+  for (const name of fs.readdirSync(lib)) {
+    if (!name.endsWith('.js')) continue
+    const text = fs.readFileSync(path.join(lib, name), 'utf8')
+    for (const match of text.matchAll(/(?:from\s+|import\s*\(\s*|import\s+)['"]([^'"]+)['"]/g)) {
+      assert.doesNotMatch(match[1], /(?:^|\/)(?:runner|recipe|recipe-runner|verification|ledger)\.js$/, `${name} imports ${match[1]}`)
+    }
+  }
 })

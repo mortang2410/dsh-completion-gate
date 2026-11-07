@@ -5,8 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { CompletionGateService } from '../lib/index.js'
-import { reportMarkdown } from '../lib/core.js'
-import { contentKey, isDocumentationOnly, isDocumentationPath } from '../lib/changes.js'
+import { contentKey, isDocumentationPath } from '../lib/changes.js'
 
 // These tests drive the real service, so they fail if the gate goes back to a source that
 // cannot separate the user's pre-existing uncommitted work from a change this session made.
@@ -45,23 +44,19 @@ function recorder(entries = new Map()) {
   }
 }
 
-function service({ workspaceChanges = recorder(), settings = {} } = {}) {
+function service({ workspaceChanges = recorder() } = {}) {
   fs.mkdirSync(workRoot, { recursive: true })
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(workRoot, 'cg-gate-settings-')))
-  // The gate starts against a stub host, so tests can publish turn events through its session/event hook.
-  const listeners = new Map()
+  // The gate starts against a stub host, so the test drives its change observer and its stop hook directly.
   const off = () => () => {}
   const ctx = {
     reflect: { get: name => (name === 'workspaceChanges' ? workspaceChanges : undefined) },
-    on: (name, listener) => { listeners.set(name, listener); return off() },
+    on: () => off(),
     provide: off, tools: { register: off }, commands: { register: off }, systemPrompt: { section: off }, webServer: { register: off },
   }
-  const instance = new CompletionGateService(ctx, settings, { settingsPath: path.join(dir, 'settings.json') })
+  const instance = new CompletionGateService(ctx, {}, { settingsPath: path.join(dir, 'settings.json') })
   instance.__testSettingsDir = dir
   instance.start()
-  let published = 0
-  // Publish one event the way dsh-session does: the session first, then { type, seq, time, data }.
-  instance.publish = (agent, type, data) => listeners.get('session/event')({ id: agent.id }, { type, seq: ++published, time: Date.now(), data })
   return instance
 }
 
@@ -71,18 +66,18 @@ function agentFor(cwd, id = 'session-1') {
 }
 
 // Announce one `workspace/changes` event the way the host recorder does, and register the
-// summary the service will serve for that sequence.
-function announce(svc, sessionId, turn, seq, files) {
+// summary the service will serve for that sequence. `cwd` is the directory the recorder reports its paths against.
+function announce(svc, sessionId, turn, seq, files, cwd) {
   svc.changes.observe({ id: sessionId }, { type: 'turn/start', data: { turn } })
   svc.changes.observe({ id: sessionId }, { type: 'workspace/changes', seq, data: { turn } })
   svc.changeService().entries.set(`${sessionId}:${seq}`, {
-    turn, cwd: '/repo', files, total: files.length, added: files.length, deleted: 0,
+    turn, cwd, files, total: files.length, added: files.length, deleted: 0,
   })
 }
 
 const file = (p) => ({ path: p, display: p, added: 1, deleted: 0 })
 
-// A catalog with one item, 'unit', so an attestation can state it. The legacy stop path needs one item state to pass.
+// A catalog with one item, 'unit', so an attestation can state it.
 function writeUnitCatalog(repo) {
   fs.mkdirSync(path.join(repo, '.dsh'), { recursive: true })
   const stamp = '2026-11-07T00:00:00.000Z'
@@ -97,13 +92,15 @@ test('a repository with pre-existing dirt does not look changed to the gate', as
 
   const svc = service()
   try {
-    // No `force`: this is the ordinary stop path. The old rule reported app.js as this
-    // session's change, so the gate ran the machine checks and blocked on a repository that
-    // carries unrelated dirt. The turn-scoped record attributes nothing, so the gate skips.
-    const report = await svc.run(agentFor(repo), new AbortController().signal)
-    assert.deepEqual(report.changedFiles, [], 'pre-existing dirt must not be attributed to this session')
-    assert.equal(report.skipped, true, 'a session that changed nothing is skipped, not evaluated')
-    assert.equal(report.pass, true, `unexpected blockers: ${JSON.stringify(report.blockers)}`)
+    const agent = agentFor(repo)
+    // The turn ran and the recorder announced nothing for it, because the turn changed no file. The dirt above is
+    // in the baseline, so no file is attributed to this session and the stop has nothing to say.
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/end', data: { turn: 1 } })
+    await svc.stopping({ agent, turn: 1 })
+    assert.equal(agent.steers.length, 0, 'pre-existing dirt must not produce an advisory')
+    const report = await svc.repositoryReport(agent)
+    assert.deepEqual(report.repositories, [], 'pre-existing dirt must not be attributed to this session')
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
@@ -112,9 +109,13 @@ test('a turn the recorder reported changes for is attributed to the session', as
   const changes = recorder()
   const svc = service({ workspaceChanges: changes })
   try {
-    announce(svc, 'session-1', 3, 305, [file('src/feature.js')])
-    const report = await svc.run(agentFor(repo), new AbortController().signal, { force: true })
-    assert.deepEqual(report.changedFiles, ['src/feature.js'])
+    const agent = agentFor(repo)
+    announce(svc, 'session-1', 3, 305, [file('src/feature.js')], repo)
+    const report = await svc.repositoryReport(agent)
+    assert.deepEqual(
+      report.repositories.map(repository => ({ root: repository.root, files: repository.files.map(item => item.absolute) })),
+      [{ root: repo, files: [path.join(repo, 'src', 'feature.js')] }],
+    )
     assert.deepEqual(changes.announced, [305], 'the summary must be read by the event sequence, not the turn number')
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
@@ -123,183 +124,58 @@ test('an absent recorder blocks saying changes cannot be determined', async t =>
   const repo = tempRepo(t)
   const svc = service({ workspaceChanges: null })
   try {
-    const report = await svc.run(agentFor(repo), new AbortController().signal, { force: true })
-    assert.equal(report.pass, false)
-    assert.equal(report.changesDetermined, false)
-    assert.match(report.blockers.join(' '), /cannot be determined/)
-  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
-})
-
-test('a documentation-only turn does not demand a test command', async t => {
-  const repo = tempRepo(t)
-  const svc = service({ workspaceChanges: recorder(), settings: { requireTests: true } })
-  try {
-    announce(svc, 'session-1', 5, 500, [file('README.md'), file('docs/guide.md'), file('LICENSE')])
-    const report = await svc.run(agentFor(repo), new AbortController().signal, { force: true })
-    assert.equal(report.documentationOnly, true)
-    assert.deepEqual(report.checks, [], 'no behavioral check may run for a documentation-only turn')
-    assert.doesNotMatch(report.blockers.join(' '), /No executable test command/, 'the missing-test blocker must not fire')
-  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
-})
-
-test('one non-documentation path makes the turn verified as before', async t => {
-  const repo = tempRepo(t)
-  const svc = service({ workspaceChanges: recorder(), settings: { requireTests: true } })
-  try {
-    announce(svc, 'session-1', 6, 600, [file('README.md'), file('src/app.js')])
-    const report = await svc.run(agentFor(repo), new AbortController().signal, { force: true })
-    assert.equal(report.documentationOnly, false)
-    assert.match(report.blockers.join(' '), /No executable test command/, 'a mixed change must still require a test command')
+    const agent = agentFor(repo)
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
+    await svc.stopping({ agent, turn: 1 })
+    assert.equal(agent.steers.length, 1, 'the stop sends one advisory when the recorder is absent')
+    assert.match(agent.steers[0].content[0].text, /The host change recorder \(workspaceChanges\) is not available, so the files this turn changed cannot be determined\./)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
 test('a documentation-only turn still requires attestation of every changed file', async t => {
   const repo = tempRepo(t)
-  const svc = service({ workspaceChanges: recorder(), settings: { requireTests: false, requireAttestation: true } })
+  const svc = service({ workspaceChanges: recorder() })
   try {
-    announce(svc, 'session-1', 7, 700, [file('README.md')])
-    const report = await svc.run(agentFor(repo), new AbortController().signal, { force: true })
-    assert.equal(report.attestation.pass, false)
-    assert.match(report.blockers.join(' '), /No completion attestation/, 'a prose change is still reviewed')
+    const agent = agentFor(repo)
+    announce(svc, 'session-1', 7, 700, [file('README.md')], repo)
+    await svc.stopping({ agent, turn: 7 })
+    assert.equal(agent.steers.length, 1, 'the stop sends one advisory for an unattested documentation change')
+    const text = agent.steers[0].content[0].text
+    assert.match(text, /Attestation: missing\./)
+    assert.match(text, /Changed documentation not checked yet:\n- .*README\.md/, 'a prose change is still reviewed, and its path is named')
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-test('the added-line scans still read a documentation-only diff', () => {
-  // The classifier exempts behavioral checks only; the scanners receive the turn's added lines.
-  assert.equal(isDocumentationOnly(['README.md', 'notes.txt']), true)
+// Each kind of changed path, sorted by the documentation check: an extension, a plain basename, or neither.
+test('the documentation path classifier sorts each kind of changed path', () => {
+  assert.equal(isDocumentationPath('README.md'), true)
+  assert.equal(isDocumentationPath('notes.txt'), true)
   assert.equal(isDocumentationPath('docs/a.mdx'), true)
   assert.equal(isDocumentationPath('LICENSE'), true)
   assert.equal(isDocumentationPath('CODEOWNERS'), true)
   assert.equal(isDocumentationPath('src/app.js'), false)
   assert.equal(isDocumentationPath('LICENSE.md'), true)
   assert.equal(isDocumentationPath('licence'), true)
-  assert.equal(isDocumentationOnly([]), false, 'a turn with no changes is not exempt')
 })
 
-test('an in-turn check before the turn has any change record is undetermined and writes no ledger row', async t => {
+test('an in-turn check before the turn has any change record is undetermined in the status report', async t => {
   const repo = tempRepo(t)
-  fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'probe', version: '1.0.0', scripts: { test: 'node -e "process.exit(0)"' } }) + '\n')
   const svc = service()
   try {
     const agent = agentFor(repo)
     // The turn has started but the recorder has announced nothing for it yet.
     svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
-
-    const report = await svc.run(agent, new AbortController().signal)
-    assert.equal(report.changesDetermined, false, 'an in-turn check with no record must not report the change set as determined')
-    assert.equal(report.pass, false)
-    assert.match(report.blockers.join(' '), /cannot be determined/)
-
-    // The recipe must actually run, so that a ledger write would have happened if one were made.
-    const outcome = await svc.recipe(agent, {})
-    assert.equal(outcome.ok, true, `the recipe did not run: ${JSON.stringify(outcome.blockers ?? outcome.problems)}`)
-    assert.equal(outcome.run.pass, true)
-    assert.deepEqual(svc.ledger.rowsFor('session-1'), [], 'an undetermined turn wrote a verification row')
-  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
-})
-
-// A verification run is recorded against the workspace as it stood BEFORE the run. A recipe or a
-// probe that rewrites a listed file moves the evidence fingerprint, so its row can never satisfy
-// the gate. A command's own rewrite is not evidence for the bytes it wrote, so the row earns no
-// coverage (fail closed), and the blocker names the stale verification instead of a missing command.
-test('a passing recipe that rewrites a listed file does not cover the missing-harness blocker', async t => {
-  const repo = tempRepo(t)
-  fs.mkdirSync(path.join(repo, '.dsh'))
-  fs.writeFileSync(path.join(repo, '.dsh', 'environment.json'), JSON.stringify({
-    version: 1,
-    recipe: { name: 'rewrites-a-listed-file', kind: 'node', test: [`node -e "require('fs').writeFileSync('app.js','rewritten by the recipe\\n')"`] },
-  }) + '\n')
-  const svc = service()
-  try {
-    const agent = agentFor(repo)
-    announce(svc, 'session-1', 1, 401, [file('app.js')])
-    svc.changeService().entries.set('session-1:401', { turn: 1, cwd: repo, files: [file('app.js')], total: 1, added: 1, deleted: 0 })
-
-    const before = await svc.turnChanges(agent, null, { explicit: true })
-    assert.equal(before.determined, true, 'precondition: the change set is determined before the recipe runs')
-    const outcome = await svc.recipe(agent, {})
-    assert.equal(outcome.ok, true, `the recipe did not run: ${JSON.stringify(outcome.blockers ?? outcome.problems)}`)
-    assert.equal(outcome.run.pass, true, `the recipe phase did not pass: ${JSON.stringify(outcome.run.reason ?? outcome.run.phases)}`)
-    assert.equal(fs.readFileSync(path.join(repo, 'app.js'), 'utf8'), 'rewritten by the recipe\n', 'precondition: the recipe must actually rewrite the listed file')
-    assert.notEqual(before.fingerprint, outcome.report.fingerprint, 'precondition: the rewrite moved the workspace fingerprint')
-
-    const rows = svc.ledger.rowsFor('session-1')
-    assert.equal(rows.length, 1, 'a passing recipe must record exactly one verification row')
-    assert.equal(rows[0].pass, true)
-    assert.equal(rows[0].fingerprint, before.fingerprint, 'the row must be keyed to the workspace as it stood before the recipe rewrote the listed file')
-    assert.equal(outcome.report.verificationCoveredMissingHarness, false, `a row keyed to the pre-run bytes must not cover the missing-harness condition: ${JSON.stringify(outcome.report.blockers)}`)
-    assert.doesNotMatch(outcome.report.blockers.join(' '), /No executable test command was detected/, 'the stale pass must not be reported as a missing test command')
-    assert.match(outcome.report.blockers.join(' '), /A verification ran and passed but the workspace changed afterwards.*recipe "rewrites-a-listed-file"/, 'the blocker must name the stale verification')
-    assert.match(outcome.report.blockers.join(' '), /No completion attestation exists/, 'the attestation requirement is independent of the recipe')
-    assert.equal(outcome.report.pass, false, 'a missing attestation still blocks the turn')
-  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
-})
-
-// The same shape in the sibling caller: a temporary probe that is itself part of the turn's change
-// record is deleted after it passes, so the workspace moves away from the row recorded before the
-// deletion. That row is keyed to the pre-run bytes and earns no coverage (fail closed).
-test('a passing temporary verifier that is itself a changed file does not cover the missing-harness blocker', async t => {
-  const repo = tempRepo(t)
-  const script = path.resolve(os.tmpdir(), `dsh-verify-probe-${process.pid}-${Date.now()}.js`)
-  fs.writeFileSync(script, 'process.exit(0)\n', { mode: 0o755 })
-  t.after(() => { try { fs.rmSync(script, { force: true }) } catch {} })
-  const svc = service()
-  try {
-    const agent = agentFor(repo)
-    const listed = [file('app.js'), file(script)]
-    announce(svc, 'session-1', 1, 403, listed)
-    svc.changeService().entries.set('session-1:403', { turn: 1, cwd: repo, files: listed, total: listed.length, added: listed.length, deleted: 0 })
-
-    const before = await svc.turnChanges(agent, null, { explicit: true })
-    assert.equal(before.determined, true, 'precondition: the change set is determined before the probe runs')
-    const outcome = await svc.temporaryVerify(agent, { script_path: script, runtime: 'node' })
-    assert.equal(outcome.ok, true, `the probe was refused: ${JSON.stringify(outcome.blockers)}`)
-    assert.equal(outcome.run.pass, true, `the probe did not pass: ${JSON.stringify(outcome.run.detail)}`)
-    assert.equal(fs.existsSync(script), false, 'precondition: a passing probe is deleted, which moves the workspace fingerprint')
-    assert.notEqual(before.fingerprint, outcome.report.fingerprint, 'precondition: the deletion moved the workspace fingerprint')
-
-    const rows = svc.ledger.rowsFor('session-1')
-    assert.equal(rows.length, 1, 'a passing probe must record exactly one verification row')
-    assert.equal(rows[0].pass, true)
-    assert.equal(rows[0].fingerprint, before.fingerprint, 'the row must be keyed to the workspace as it stood before the probe was deleted')
-    assert.equal(outcome.report.verificationCoveredMissingHarness, false, `a row keyed to the pre-run bytes must not cover the missing-harness condition: ${JSON.stringify(outcome.report.blockers)}`)
-    assert.doesNotMatch(outcome.report.blockers.join(' '), /No executable test command was detected/, 'the stale pass must not be reported as a missing test command')
-    assert.match(outcome.report.blockers.join(' '), /A verification ran and passed but the workspace changed afterwards.*temporary "dsh-verify-probe-/, 'the blocker must name the stale probe')
-    assert.match(outcome.report.blockers.join(' '), /No completion attestation exists/, 'the attestation requirement is independent of the probe')
-  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
-})
-
-test('a recipe that rewrites a listed file reports its stale verification by name, not as a missing test command', async t => {
-  const repo = tempRepo(t)
-  fs.mkdirSync(path.join(repo, '.dsh'))
-  fs.writeFileSync(path.join(repo, '.dsh', 'environment.json'), JSON.stringify({
-    version: 1,
-    recipe: { name: 'rewrites-a-listed-file', kind: 'node', test: [`node -e "require('fs').writeFileSync('app.js','rewritten by the recipe\\n')"`] },
-  }) + '\n')
-  const svc = service()
-  try {
-    const agent = agentFor(repo)
-    announce(svc, 'session-1', 1, 402, [file('app.js')])
-    svc.changeService().entries.set('session-1:402', { turn: 1, cwd: repo, files: [file('app.js')], total: 1, added: 1, deleted: 0 })
-
-    const outcome = await svc.recipe(agent, {})
-    assert.equal(outcome.run.pass, true, `the recipe phase did not pass: ${JSON.stringify(outcome.run.reason ?? outcome.run.phases)}`)
-    // The exact wording and order: the stale verification is named, and the attestation blocker is unchanged.
-    assert.deepEqual(outcome.report.blockers, [
-      'A verification ran and passed but the workspace changed afterwards, so it does not cover the current files: recipe "rewrites-a-listed-file". Re-run it on the current tree.',
-      'No completion attestation exists for the current workspace state.',
-    ])
+    const status = await svc.statusResult(agent)
+    assert.match(status.markdown, /^Notice: The host change record for turn 1 has not been written yet, so the files this turn has changed cannot be determined until the turn stops\.$/m)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
 test('a turn keeps its attestation across repeated stops while its files and contents are unchanged', async t => {
   const repo = tempRepo(t)
-  fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'probe', version: '1.0.0', scripts: { test: 'node -e "process.exit(0)"' } }) + '\n')
   fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 2\n')
   const svc = service()
   try {
     const agent = agentFor(repo)
-    const signal = new AbortController().signal
     // Each call is one `workspace/changes` announcement, as a stop produces it, for the same file.
     const publish = seq => {
       svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 3 } })
@@ -313,20 +189,21 @@ test('a turn keeps its attestation across repeated stops while its files and con
     }
 
     publish(305)
-    await svc.stopping({ agent, turn: 3, signal })
+    await svc.stopping({ agent, turn: 3 })
     assert.equal(agent.steers.length, 1, 'stop 1 sends one advisory message until the change set is attested')
     assert.match(agent.steers[0].content[0].text, /Attestation: missing/)
+    assert.ok(agent.steers[0].content[0].text.includes(`Root: ${repo}`), 'the advisory names the repository it is about')
 
     const attested = await svc.attest(agent, attestation)
     assert.equal(attested.pass, true, `attest failed: ${JSON.stringify(attested.blockers)}`)
 
     publish(307)
-    await svc.stopping({ agent, turn: 3, signal })
+    await svc.stopping({ agent, turn: 3 })
     assert.equal(agent.steers.length, 1, 'a repeated stop over an attested, unchanged change set must send nothing')
 
     fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 3\n')
     publish(309)
-    await svc.stopping({ agent, turn: 3, signal })
+    await svc.stopping({ agent, turn: 3 })
     assert.equal(agent.steers.length, 2, 'an edited file must reopen the repository and send one message')
     assert.match(agent.steers[1].content[0].text, /Attestation: stale/)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
@@ -344,18 +221,12 @@ test('a moved nested repository pointer changes the attestation identity and an 
   git(child, ['add', '-A'])
   git(child, ['commit', '-qm', 'child A'])
 
-  const svc = service({ settings: { requireTests: false } })
+  const svc = service()
   try {
     const agent = agentFor(repo)
-    const signal = new AbortController().signal
-    const publish = seq => {
-      svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 5 } })
-      svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 5 } })
-      svc.changeService().entries.set(`session-1:${seq}`, { turn: 5, cwd: repo, files: [file('nested')], total: 1, added: 1, deleted: 0 })
-    }
 
     // The nested repository is its own repository root, so the pointer is attested under the child root as the path '.'.
-    publish(60)
+    announce(svc, 'session-1', 5, 60, [file('nested')], repo)
     writeUnitCatalog(child)
     const attested = await svc.attest(agent, {
       action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'],
@@ -364,92 +235,68 @@ test('a moved nested repository pointer changes the attestation identity and an 
     assert.equal(attested.pass, true, `attest failed: ${JSON.stringify(attested.blockers)}`)
 
     // No move: the same child commit keeps the attestation valid at the next stop.
-    publish(61)
-    await svc.stopping({ agent, turn: 5, signal })
+    announce(svc, 'session-1', 5, 61, [file('nested')], repo)
+    await svc.stopping({ agent, turn: 5 })
     assert.equal(agent.steers.length, 0, 'an unmoved nested repository must keep its attestation')
 
     // The child's HEAD moves after attestation, in the same turn.
     fs.writeFileSync(path.join(child, 'lib.js'), 'module.exports = 2\n')
     git(child, ['add', '-A'])
     git(child, ['commit', '-qm', 'child B'])
-    publish(63)
-    await svc.stopping({ agent, turn: 5, signal })
+    announce(svc, 'session-1', 5, 63, [file('nested')], repo)
+    await svc.stopping({ agent, turn: 5 })
     assert.equal(agent.steers.length, 1, 'a moved nested repository pointer must reopen the attestation and send one message')
     assert.match(agent.steers[0].content[0].text, /Attestation: stale/)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-test('a change record with no changed files passes with "no changed files" under the default config', async t => {
-  const repo = tempRepo(t)
-  const svc = service()
-  try {
-    const agent = agentFor(repo)
-    const signal = new AbortController().signal
-    svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
-    svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq: 70, data: { turn: 1 } })
-    svc.changeService().entries.set('session-1:70', { turn: 1, cwd: repo, files: [], total: 0, added: 0, deleted: 0 })
-    svc.changes.observe({ id: 'session-1' }, { type: 'turn/end', data: { turn: 1 } })
-
-    // The operator's /gate is a forced run. It must report the same result as the stop check.
-    await svc.stopping({ agent, turn: 1, signal })
-    assert.equal(agent.steers.length, 0, 'the stop check passes a turn with no changed files')
-
-    const report = await svc.run(agent, signal, { force: true })
-    assert.equal(report.changesDetermined, true)
-    assert.equal(report.pass, true, `a turn with no changed files must pass: ${JSON.stringify(report.blockers)}`)
-    assert.equal(report.notice, 'no changed files')
-    assert.match(reportMarkdown(report), /no changed files/)
-  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
-})
-
 // Regression guard for the decided behavior (overseer decision (i)). The host writes no change record for
-// a turn that changed nothing, so after the turn has ended an absent record means no changes. This test
-// may pass before and after a change to the gate; it exists so that the stop check and /gate cannot drift
-// apart and so that the "not written yet" block cannot return after the turn ends.
-test('an ended turn with no change record reads as no changes: the stop check and /gate both pass, with no ledger row', async t => {
+// a turn that changed nothing, so after the turn has ended an absent record means no changes. The stop check
+// and the status report must agree, and the "not written yet" block must not return after the turn ends.
+// It fails when an ended turn is read as undetermined, or as still open.
+test('an ended turn with no change record reads as no changes: the stop sends nothing and the status shows no notice', async t => {
   const repo = tempRepo(t)
   const svc = service()
   try {
     const agent = agentFor(repo)
-    const signal = new AbortController().signal
     svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
     svc.changes.observe({ id: 'session-1' }, { type: 'turn/end', data: { turn: 1 } })
     // No workspace/changes event is observed for this turn: the recorder writes nothing for a turn that changed nothing.
 
-    await svc.stopping({ agent, turn: 1, signal })
+    await svc.stopping({ agent, turn: 1 })
     assert.equal(agent.steers.length, 0, 'the stop sends nothing for an ended turn with no change record')
 
-    const forced = await svc.run(agent, signal, { force: true })
-    assert.equal(forced.pass, true, `/gate must pass an ended turn with no change record: ${JSON.stringify(forced.blockers)}`)
-    assert.equal(forced.changesDetermined, true)
-    assert.doesNotMatch(forced.blockers.join(' '), /not been written yet/, 'an ended turn must not report its record as not yet written')
-    assert.deepEqual(svc.ledger.rowsFor('session-1'), [], 'a turn with no change record must not write a ledger row')
+    const report = await svc.repositoryReport(agent)
+    assert.deepEqual(report.notices, [], 'an ended turn must not report its record as missing or undetermined')
+    assert.deepEqual(report.repositories, [], 'a turn with no change record attributes no repository')
+    const status = await svc.statusResult(agent)
+    assert.doesNotMatch(status.markdown, /not been written yet/, 'an ended turn must not report its record as not yet written')
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
 test('a turn that changed nothing reports its stop result once the turn has ended', async t => {
   const repo = tempRepo(t)
-  const svc = service({ settings: { requireAttestation: false, requireTests: false } })
+  const svc = service()
   try {
     const agent = agentFor(repo)
-    const signal = new AbortController().signal
     svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
 
     // Before the stop, the recorder has written nothing for this turn, so its change set is undetermined.
-    assert.equal((await svc.run(agent, signal)).changesDetermined, false)
+    const open = await svc.turnChanges(agent)
+    assert.equal(open.determined, false)
+    assert.match(open.reason, /has not been written yet/)
 
     // The stop passes a turn that changed nothing. The stop hook alone does not end the turn, because a
     // steered stop continues the same turn number, so a call made now is still inside the turn.
-    await svc.stopping({ agent, turn: 1, signal })
+    await svc.stopping({ agent, turn: 1 })
     assert.equal(agent.steers.length, 0, 'a turn that changed nothing passes its stop')
-    assert.equal((await svc.run(agent, signal)).changesDetermined, false)
+    assert.equal((await svc.turnChanges(agent)).determined, false)
 
     // The host ends the turn after its stop. From here a missing record means the turn changed nothing.
     svc.changes.observe({ id: 'session-1' }, { type: 'turn/end', data: { turn: 1 } })
-    const forced = await svc.run(agent, signal, { force: true })
-    assert.equal(forced.changesDetermined, true, `the stop result must hold after the turn ends: ${JSON.stringify(forced.blockers)}`)
-    assert.deepEqual(forced.changedFiles, [])
-    assert.equal(forced.pass, true, `unexpected blockers: ${JSON.stringify(forced.blockers)}`)
+    const ended = await svc.turnChanges(agent)
+    assert.equal(ended.determined, true, `the change set must be determined once the turn has ended: ${ended.reason}`)
+    assert.deepEqual(ended.files, [])
 
     // A repository with no changed file owes no claim and no item, so an attest made after the turn ended passes.
     const attested = await svc.attest(agent, { action: 'attest', repository_root: repo })
@@ -504,56 +351,43 @@ function readyCheckRepo(t) {
   return repo
 }
 
-function publishReady(svc, seq) {
-  svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 2 } })
-  svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 2 } })
-  svc.changeService().entries.set(`session-1:${seq}`, { turn: 2, cwd: svc.__repo, files: [file('app.js')], total: 1, added: 1, deleted: 0 })
-}
-
-test('a stop runs no required check, so a failing check neither runs nor is named at any stop', async t => {
+test('a stop starts no project check, so a failing check is neither run nor named at any stop', async t => {
   const repo = readyCheckRepo(t)
   const svc = service()
-  svc.__repo = repo
   try {
     const agent = agentFor(repo)
-    const signal = new AbortController().signal
-    publishReady(svc, 40)
-    await svc.stopping({ agent, turn: 2, signal })
+    announce(svc, 'session-1', 2, 40, [file('app.js')], repo)
+    await svc.stopping({ agent, turn: 2 })
     assert.equal(agent.steers.length, 1, 'stop 1 sends its advisory about the unclaimed file')
     assert.doesNotMatch(agent.steers[0].content[0].text, /failed/, 'a stop must not name a check failure')
     assert.equal(fs.existsSync(path.join(repo, 'ran')), false, 'stop 1 must not run the test script')
 
     // The environment is fixed and the listed bytes are unchanged. The next stop still runs nothing.
     fs.writeFileSync(path.join(repo, 'ready'), '')
-    publishReady(svc, 42)
-    await svc.stopping({ agent, turn: 2, signal })
+    announce(svc, 'session-1', 2, 42, [file('app.js')], repo)
+    await svc.stopping({ agent, turn: 2 })
     assert.equal(fs.existsSync(path.join(repo, 'ran')), false, 'stop 2 must not run the test script after the fix either')
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-test('attest starts no check and caches nothing, and no stop runs the check', async t => {
+test('attest starts no project check, and no stop starts it either', async t => {
   const repo = readyCheckRepo(t)
   const svc = service()
-  svc.__repo = repo
   try {
     const agent = agentFor(repo)
-    const signal = new AbortController().signal
-    publishReady(svc, 40)
+    announce(svc, 'session-1', 2, 40, [file('app.js')], repo)
     assert.equal(fs.existsSync(path.join(repo, 'ready')), false, 'precondition: the test script would fail without the ready file')
     await svc.attest(agent, { action: 'attest', repository_root: repo })
-    assert.equal(svc.state(agent).cached.size, 0, 'attest caches no machine result')
-    assert.equal(svc.state(agent).lastReport, null, 'attest records no check report')
     assert.equal(fs.existsSync(path.join(repo, 'ran')), false, 'attest must not run the test script')
 
-    await svc.stopping({ agent, turn: 2, signal })
+    await svc.stopping({ agent, turn: 2 })
     assert.equal(fs.existsSync(path.join(repo, 'ran')), false, 'the stop must not run the test script')
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-// A nested repository whose HEAD cannot be read at one stop. The pointer does not move, so the gate must
-// block with the named message for that stop, and pass again once the HEAD reads. The unreadable read must
-// not replace the identity the path already had.
-test('an unreadable nested HEAD is reported with the named message and passes once it reads with the pointer unchanged', async t => {
+// A nested repository whose HEAD cannot be read at one stop. The pointer does not move, so the stop must say the gate
+// could not check the commit at that stop, without reopening the attestation. Once the HEAD reads, the stop sends nothing.
+test('an unreadable nested HEAD is reported at the stop, and the attestation holds once it reads again', async t => {
   const repo = tempRepo(t)
   const child = path.join(repo, 'nested')
   fs.mkdirSync(child)
@@ -564,24 +398,16 @@ test('an unreadable nested HEAD is reported with the named message and passes on
   git(child, ['add', '-A'])
   git(child, ['commit', '-qm', 'child A'])
 
-  const svc = service({ settings: { requireTests: false } })
+  const svc = service()
   try {
     const agent = agentFor(repo)
-    const signal = new AbortController().signal
-    const publish = seq => {
-      svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 5 } })
-      svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 5 } })
-      svc.changeService().entries.set(`session-1:${seq}`, { turn: 5, cwd: repo, files: [file('nested')], total: 1, added: 1, deleted: 0 })
-    }
     const headFile = path.join(child, '.git', 'HEAD')
     const savedHead = fs.readFileSync(headFile, 'utf8')
-    const named = /Nested repository nested: could not read nested HEAD; re-run \/gate\./
-    const stopNotice = /Nested repository nested: could not read its HEAD at this stop/
 
     // The nested pointer is a file of its own repository (a directory with a .git entry owns itself), so the attest
     // names the child root and the pointer is the child root itself: the path '.'.
     writeUnitCatalog(child)
-    publish(60)
+    announce(svc, 'session-1', 1, 60, [file('nested')], repo)
     const attested = await svc.attest(agent, {
       action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'],
       items: [{ id: 'unit', state: 'passed' }], summary: 'Reviewed the nested repository pointer.',
@@ -589,26 +415,28 @@ test('an unreadable nested HEAD is reported with the named message and passes on
     assert.equal(attested.pass, true, `attest failed: ${JSON.stringify(attested.blockers)}`)
 
     // Stop 1: the child HEAD reads and the pointer is unchanged, so the stop passes.
-    publish(61)
-    await svc.stopping({ agent, turn: 5, signal })
+    announce(svc, 'session-1', 1, 61, [file('nested')], repo)
+    await svc.stopping({ agent, turn: 1 })
     assert.equal(agent.steers.length, 0, 'stop 1 passes at the attested commit')
 
     // Stop 2: git cannot read the child HEAD, because HEAD names a branch that does not exist. The pointer did not move.
     fs.writeFileSync(headFile, 'ref: refs/heads/missing-for-test\n')
-    publish(62)
-    await svc.stopping({ agent, turn: 5, signal })
+    announce(svc, 'session-1', 1, 62, [file('nested')], repo)
+    await svc.stopping({ agent, turn: 1 })
     assert.equal(agent.steers.length, 1, 'stop 2 sends one notice while the nested HEAD cannot be read')
-    assert.match(agent.steers[0].content[0].text, stopNotice)
+    assert.match(agent.steers[0].content[0].text, /Nested repository nested: could not read its HEAD at this stop/)
     assert.doesNotMatch(agent.steers[0].content[0].text, /Attestation: (missing|stale)/, 'an unreadable HEAD must keep the identity of the path, so the attestation stays current')
 
-    const during = await svc.run(agent, signal, { force: true })
-    assert.equal(during.pass, false, '/gate during the failure window must block')
-    assert.match(during.blockers.join(' '), named, '/gate names the same block during the failure window')
+    // The status report names the same read failure, and the attested child repository still reads as complete.
+    const during = await svc.repositoryReport(agent)
+    assert.deepEqual(during.notices, ['Nested repository nested: could not read its HEAD.'])
+    const childEntry = during.repositories.find(repository => repository.root === child)
+    assert.equal(childEntry?.complete, true, 'the attested child keeps its identity while its HEAD is unreadable')
 
-    // Stop 3: the HEAD reads again at the same commit, so the stop passes.
+    // Stop 3: the HEAD reads again at the same commit, so the stop sends nothing new.
     fs.writeFileSync(headFile, savedHead)
-    publish(63)
-    await svc.stopping({ agent, turn: 5, signal })
+    announce(svc, 'session-1', 1, 63, [file('nested')], repo)
+    await svc.stopping({ agent, turn: 1 })
     assert.equal(agent.steers.length, 1, `stop 3 must send nothing once the nested HEAD reads again: ${agent.steers.at(-1)?.content[0].text}`)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
@@ -631,67 +459,55 @@ test('an attest during a first nested HEAD read failure binds nothing, and one a
   // HEAD names a branch that does not exist, so the first-ever read of this path fails.
   fs.writeFileSync(headFile, 'ref: refs/heads/missing-for-test\n')
 
-  const svc = service({ settings: { requireTests: false } })
+  const svc = service()
   try {
     const agent = agentFor(repo)
-    const signal = new AbortController().signal
-    const publish = seq => {
-      svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 5 } })
-      svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 5 } })
-      svc.changeService().entries.set(`session-1:${seq}`, { turn: 5, cwd: repo, files: [file('nested')], total: 1, added: 1, deleted: 0 })
-    }
     const attestation = {
       action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'],
       items: [{ id: 'unit', state: 'passed' }], summary: 'Reviewed the nested repository pointer.',
     }
 
-    publish(80)
+    announce(svc, 'session-1', 5, 80, [file('nested')], repo)
     await assert.rejects(svc.attest(agent, attestation), /Nested repository nested has no readable HEAD yet, so nothing is attested/)
-    assert.equal(svc.state(agent).attestation, null, 'a refused attest must bind nothing to the placeholder identity')
+    // The refused call bound nothing: the child repository is listed with no attestation.
+    const refused = await svc.repositoryReport(agent)
+    const childEntry = refused.repositories.find(repository => repository.root === child)
+    assert.equal(childEntry?.attestation, null, 'a refused attest must bind nothing to the placeholder identity')
 
     fs.writeFileSync(headFile, savedHead)
     writeUnitCatalog(child)
-    publish(81)
+    announce(svc, 'session-1', 5, 81, [file('nested')], repo)
     const attested = await svc.attest(agent, attestation)
     assert.equal(attested.pass, true, `one attest after recovery must pass: ${JSON.stringify(attested.blockers)}`)
 
-    publish(82)
-    await svc.stopping({ agent, turn: 5, signal })
+    announce(svc, 'session-1', 5, 82, [file('nested')], repo)
+    await svc.stopping({ agent, turn: 5 })
     assert.equal(agent.steers.length, 0, `the stop after that attest must pass: ${agent.steers.at(-1)?.content[0].text}`)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-// A nested repository with no commit yet. Git cannot read its HEAD, and the block names that cause rather than the
-// generic read failure. The host does not list such a repository, so the test reaches the gate's own read directly.
-test('an unborn nested repository blocks with its own message, and the block clears once it has a commit', async t => {
+// A nested repository with no commit yet. Git cannot read its HEAD, so the gate reports it as unreadable, the same as
+// a broken HEAD. The host does not list such a repository, so the test announces it directly.
+test('an unborn nested repository is reported as unreadable until it has a commit', async t => {
   const repo = tempRepo(t)
   const child = path.join(repo, 'nested')
   fs.mkdirSync(child)
   git(child, ['init', '-q', '.'])
-  const svc = service({ settings: { requireTests: false } })
+  const svc = service()
   try {
     const agent = agentFor(repo)
-    const signal = new AbortController().signal
-    const publish = seq => {
-      svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 6 } })
-      svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 6 } })
-      svc.changeService().entries.set(`session-1:${seq}`, { turn: 6, cwd: repo, files: [file('nested')], total: 1, added: 1, deleted: 0 })
-    }
-
-    publish(90)
-    const blocked = await svc.run(agent, signal)
-    assert.equal(blocked.pass, false, 'an unborn nested repository must block')
-    assert.match(blocked.blockers.join(' '), /Nested repository nested: nested repository has no commit; commit in it, then run \/gate again\./)
-    assert.doesNotMatch(blocked.blockers.join(' '), /could not read nested HEAD/, 'an unborn repository must not get the generic read message')
+    announce(svc, 'session-1', 1, 90, [file('nested')], repo)
+    const blocked = await svc.repositoryReport(agent)
+    assert.deepEqual(blocked.notices, ['Nested repository nested: could not read its HEAD.'], 'an unborn nested repository must be named as unreadable')
 
     git(child, ['config', 'user.email', 'test@example.com'])
     git(child, ['config', 'user.name', 'test'])
     fs.writeFileSync(path.join(child, 'lib.js'), 'module.exports = 1\n')
     git(child, ['add', '-A'])
     git(child, ['commit', '-qm', 'child A'])
-    publish(91)
-    const committed = await svc.run(agent, signal)
-    assert.doesNotMatch(committed.blockers.join(' '), /has no commit|could not read nested HEAD/, `a committed nested repository must not block on its HEAD: ${JSON.stringify(committed.blockers)}`)
+    announce(svc, 'session-1', 1, 91, [file('nested')], repo)
+    const committed = await svc.repositoryReport(agent)
+    assert.deepEqual(committed.notices, [], 'a committed nested repository reads its HEAD, so no notice is left')
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
@@ -713,26 +529,19 @@ test('a moved nested pointer under a path containing a newline changes the attes
   // The identity of the listed directory is its child's HEAD, even under a newline path.
   assert.equal(await contentKey(repo, listed), `head:${headA}`, 'a nested pointer under a newline path is keyed by its HEAD')
 
-  const svc = service({ settings: { requireTests: false } })
+  const svc = service()
   try {
     const agent = agentFor(repo)
-    const signal = new AbortController().signal
-    const publish = seq => {
-      svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 6 } })
-      svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 6 } })
-      svc.changeService().entries.set(`session-1:${seq}`, { turn: 6, cwd: repo, files: [file(listed)], total: 1, added: 1, deleted: 0 })
-    }
-
     // The listed directory owns itself, so the attest names the child root and the pointer is the path '.'.
     writeUnitCatalog(child)
-    publish(70)
+    announce(svc, 'session-1', 6, 70, [file(listed)], repo)
     const attested = await svc.attest(agent, {
       action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'],
       items: [{ id: 'unit', state: 'passed' }], summary: 'Reviewed the nested repository pointer.',
     })
     assert.equal(attested.pass, true, `attest failed: ${JSON.stringify(attested.blockers)}`)
-    publish(71)
-    await svc.stopping({ agent, turn: 6, signal })
+    announce(svc, 'session-1', 6, 71, [file(listed)], repo)
+    await svc.stopping({ agent, turn: 6 })
     assert.equal(agent.steers.length, 0, 'precondition: the unmoved pointer passes')
 
     // The child's HEAD moves after attestation, in the same turn.
@@ -740,114 +549,57 @@ test('a moved nested pointer under a path containing a newline changes the attes
     git(child, ['add', '-A'])
     git(child, ['commit', '-qm', 'child B'])
     assert.notEqual(await contentKey(repo, listed), `head:${headA}`, 'the moved pointer changes the key')
-    publish(73)
-    await svc.stopping({ agent, turn: 6, signal })
+    announce(svc, 'session-1', 6, 73, [file(listed)], repo)
+    await svc.stopping({ agent, turn: 6 })
     assert.equal(agent.steers.length, 1, 'a moved pointer under a newline path must reopen the attestation and send one message')
     assert.match(agent.steers[0].content[0].text, /Attestation: stale/)
 
-    const forced = await svc.run(agent, signal, { force: true })
-    assert.equal(forced.pass, false, '/gate must block a moved pointer under a newline path')
-    assert.match(forced.blockers.join(' '), /No completion attestation/)
+    const report = await svc.repositoryReport(agent)
+    const childEntry = report.repositories.find(repository => repository.root === child)
+    assert.equal(childEntry?.complete, false, 'the status must not show a moved pointer under a newline path as complete')
+    assert.match(childEntry.problems.join(' '), /No current attestation for this repository/)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-// Before any turn of the session has completed, nothing is known about its changes. An explicit /gate must
-// fail closed, not report "no changed files" at HEAD.
-test('a /gate before any turn has completed is undetermined, not a pass', async t => {
+// A change record that was announced and then lost. The stop cannot tell which files the turn changed, so it says so.
+test('an announced change record that has vanished leaves its turn undetermined at the stop', async t => {
   const repo = tempRepo(t)
   const svc = service()
   try {
     const agent = agentFor(repo)
-    const signal = new AbortController().signal
-    const fresh = await svc.run(agent, signal, { force: true })
-    assert.equal(fresh.changesDetermined, false, 'a fresh session has no completed turn to read')
-    assert.equal(fresh.pass, false, `a /gate with no completed turn must not pass: ${JSON.stringify(fresh.blockers)}`)
-    assert.match(reportMarkdown(fresh), /no completed turn observed since the gate started/)
-
-    // A turn that has started but not completed is the same case for an explicit /gate.
-    svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
-    const open = await svc.run(agent, signal, { force: true })
-    assert.equal(open.pass, false, `a /gate inside the first turn must not pass: ${JSON.stringify(open.blockers)}`)
-    assert.match(reportMarkdown(open), /no completed turn observed since the gate started/)
+    announce(svc, 'session-1', 3, 310, [file('app.js')], repo)
+    svc.changeService().entries.delete('session-1:310')
+    await svc.stopping({ agent, turn: 3 })
+    assert.equal(agent.steers.length, 1, 'the stop sends one advisory when the announced record is gone')
+    assert.match(agent.steers[0].content[0].text, /The host change record for turn 3 \(sequence 310\) is no longer available, so the files this turn changed cannot be determined\./)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-// A host restart starts the gate with an empty tracker, and the host never publishes a session's earlier events to the
-// hook. An explicit /gate after a restart is undetermined until one turn completes, and says so (ACCEPT-H4).
-test('after a restart, an explicit /gate says no completed turn was observed since the gate started', async t => {
+// A change record that is announced but whose read throws. The stop reports the read failure rather than reading the turn as unchanged.
+test('a host change record that cannot be read leaves its turn undetermined at the stop', async t => {
   const repo = tempRepo(t)
-  const before = service()
-  const after = service()
+  const changes = recorder()
+  const svc = service({ workspaceChanges: changes })
   try {
-    before.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
-    before.changes.observe({ id: 'session-1' }, { type: 'turn/end', data: { turn: 1 } })
-    const report = await after.run(agentFor(repo), new AbortController().signal, { force: true })
-    assert.equal(report.changesDetermined, false)
-    assert.equal(report.pass, false, `a /gate after a restart must not pass: ${JSON.stringify(report.blockers)}`)
-    assert.match(report.blockers.join(' '), /no completed turn observed since the gate started/)
-  } finally {
-    fs.rmSync(before.__testSettingsDir, { recursive: true, force: true })
-    fs.rmSync(after.__testSettingsDir, { recursive: true, force: true })
-  }
-})
-
-// An absent record after the turn has ended passes, as the stop check does. The output must state that basis
-// and must never say the turn was verified or that no change was verified.
-test('a PASS from an absent record states its basis and never claims a verified no-change result', async t => {
-  const repo = tempRepo(t)
-  const svc = service()
-  try {
-    const signal = new AbortController().signal
-
-    // A turn that called a tool and produced no announced change.
-    const toolAgent = agentFor(repo, 'session-1')
-    svc.publish(toolAgent, 'turn/start', { turn: 1 })
-    svc.publish(toolAgent, 'tool/call', { turn: 1, callId: 'c1', name: 'bash', arguments: {} })
-    svc.publish(toolAgent, 'tool/result', { turn: 1, callId: 'c1' })
-    svc.publish(toolAgent, 'turn/end', { turn: 1 })
-    const tool = await svc.run(toolAgent, signal, { force: true })
-    const toolText = reportMarkdown(tool)
-    assert.equal(tool.pass, true, `a turn with no announced change passes: ${JSON.stringify(tool.blockers)}`)
-    assert.equal(tool.notice, 'no host change record for this turn')
-    assert.match(toolText, /no host change record for this turn/)
-    assert.doesNotMatch(toolText, /verified|no changed files|text-only/)
-
-    // A text-only turn: the host never inspects it, so the output names that.
-    const textAgent = agentFor(repo, 'session-2')
-    svc.publish(textAgent, 'turn/start', { turn: 1 })
-    svc.publish(textAgent, 'assistant/message', { turn: 1, message: { content: [{ type: 'text', text: 'Done.' }] } })
-    svc.publish(textAgent, 'turn/end', { turn: 1 })
-    const text = await svc.run(textAgent, signal, { force: true })
-    const textText = reportMarkdown(text)
-    assert.equal(text.pass, true, `a text-only turn with no record passes: ${JSON.stringify(text.blockers)}`)
-    assert.match(textText, /text-only turn, not inspected/)
-    assert.match(textText, /no host change record for this turn/)
-    assert.doesNotMatch(textText, /verified|no changed files/)
+    const agent = agentFor(repo)
+    announce(svc, 'session-1', 3, 320, [file('app.js')], repo)
+    changes.summary = () => { throw new Error('summary read broke') }
+    await svc.stopping({ agent, turn: 3 })
+    assert.equal(agent.steers.length, 1, 'the stop sends one advisory when the record read throws')
+    assert.match(agent.steers[0].content[0].text, /Reading the host change record for turn 3 failed: summary read broke\./)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-// The text-only check reads the turn's events from the session/event hook. A turn whose start the hook saw, with no
-// tool call, is named text-only. A turn whose start the hook never saw (the host does not publish seed events) is
-// named neither, because nothing shows that it was text-only.
-test('the text-only check reads the turn events the hook saw, and names neither basis when the turn start is missing', async t => {
+// A subagent session is not covered by the host change recorder, so its turn's changes cannot be determined. The status
+// report says so rather than reading the turn as unchanged.
+test('a subagent session is reported as not covered by the host change recorder', async t => {
   const repo = tempRepo(t)
   const svc = service()
   try {
-    const signal = new AbortController().signal
-    const textAgent = agentFor(repo, 'session-3')
-    svc.publish(textAgent, 'turn/start', { turn: 1 })
-    svc.publish(textAgent, 'assistant/message', { turn: 1, message: { content: [{ type: 'text', text: 'Done.' }] } })
-    svc.publish(textAgent, 'turn/end', { turn: 1 })
-    const text = await svc.run(textAgent, signal, { force: true })
-    assert.equal(text.pass, true, `a text-only turn with no record passes: ${JSON.stringify(text.blockers)}`)
-    assert.match(reportMarkdown(text), /text-only turn, not inspected/)
-
-    const unseenAgent = agentFor(repo, 'session-4')
-    svc.publish(unseenAgent, 'assistant/message', { turn: 2, message: { content: [{ type: 'text', text: 'Done.' }] } })
-    svc.publish(unseenAgent, 'turn/end', { turn: 2 })
-    const unseen = await svc.run(unseenAgent, signal, { force: true, turn: 2 })
-    assert.equal(unseen.pass, true, `a turn with no record passes: ${JSON.stringify(unseen.blockers)}`)
-    assert.equal(unseen.notice, 'no host change record for this turn')
-    assert.doesNotMatch(reportMarkdown(unseen), /text-only/)
+    const agent = agentFor(repo, 'subagent-1')
+    agent.session.header.parentSession = 'session-1'
+    svc.changes.observe({ id: 'subagent-1' }, { type: 'turn/start', data: { turn: 1 } })
+    const status = await svc.statusResult(agent)
+    assert.match(status.markdown, /Notice: The host change recorder does not record this session, so the files turn 1 changed cannot be determined\./)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })

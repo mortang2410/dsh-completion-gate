@@ -3,20 +3,9 @@
       name: dsh-completion-gate
       config:
         enabled: true
-        mode: advisory
         gateSubagents: false
         preventPrematureStops: true
         prematureStopMaxContinuations: 3
-        autoDetectChecks: true
-        requireTests: true
-        requireBuildWhenAvailable: true
-        requireLintWhenAvailable: true
-        requireTypecheckWhenAvailable: true
-        blockNewTodos: true
         securityScan: true
-        requireAttestation: true
-        gateOnlyChangedWorkspaces: true
-        commandTimeoutMs: 600000
-        maxOutputChars: 12000
         maxChangedFiles: 500
-        customChecks: []
+        verificationNudgeLimit: 3

@@ -95,7 +95,6 @@ async function attestFixture(t, files = ['app.js']) {
   const summaries = new Map()
   const svc = statusService(summaries)
   t.after(() => cleanupService(svc))
-  t.mock.method(svc, 'run', async () => { throw new Error('attest and status must not call run') })
   const a = agent({ cwd: session })
   announceTurn(svc, a, summaries, 1, session, files)
   await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Unit', proves: 'app.js sets value' }] }, execOf(a))

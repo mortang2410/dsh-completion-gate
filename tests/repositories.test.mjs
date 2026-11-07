@@ -39,7 +39,7 @@ function tempRepo(t) {
 }
 
 function nestedState() {
-  return { heads: new Map(), unreadable: [], unresolved: [], unborn: [] }
+  return { heads: new Map(), unreadable: [], unresolved: [] }
 }
 
 // Every lstat of a `.git` entry fails with EIO while `state.on` is true, the way an unreadable repository does.

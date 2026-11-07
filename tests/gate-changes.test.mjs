@@ -69,10 +69,23 @@ function agentFor(cwd, id = 'session-1') {
   return { id, session: { header: { cwd }, events: [] }, steer: m => steers.push(m), followup: m => followups.push(m), steers, followups }
 }
 
+let promptCount = 0
+
+// The host appends the batch of queued messages to its `turn/start`, the real user prompt included, before the first
+// step. The gate reads that prompt on the `session/event` hook, so one message is delivered here for every turn
+// opened, and a stop never runs in a state the host cannot produce.
+function userPrompt(svc, sessionId, turn) {
+  svc.publish(sessionId, 'user/message', {
+    id: `prompt-${sessionId}-${turn}-${++promptCount}`, role: 'user', source: { kind: 'user' },
+    content: [{ type: 'text', text: 'continue' }],
+  })
+}
+
 // Announce one `workspace/changes` event the way the host recorder does, and register the
 // summary the service will serve for that sequence. `cwd` is the directory the recorder reports its paths against.
 function announce(svc, sessionId, turn, seq, files, cwd) {
   svc.changes.observe({ id: sessionId }, { type: 'turn/start', data: { turn } })
+  userPrompt(svc, sessionId, turn)
   svc.changes.observe({ id: sessionId }, { type: 'workspace/changes', seq, data: { turn } })
   svc.changeService().entries.set(`${sessionId}:${seq}`, {
     turn, cwd, files, total: files.length, added: files.length, deleted: 0,
@@ -130,6 +143,7 @@ test('an absent recorder blocks saying changes cannot be determined', async t =>
   try {
     const agent = agentFor(repo)
     svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } })
+    userPrompt(svc, 'session-1', 1)
     await svc.stopping({ agent, turn: 1 })
     assert.equal(agent.steers.length, 1, 'the stop sends one advisory when the recorder is absent')
     assert.match(agent.steers[0].content[0].text, /The host change recorder \(workspaceChanges\) is not available, so the files this turn changed cannot be determined\./)
@@ -180,9 +194,11 @@ test('a turn keeps its attestation across repeated stops while its files and con
   const svc = service()
   try {
     const agent = agentFor(repo)
-    // Each call is one `workspace/changes` announcement, as a stop produces it, for the same file.
+    // The prompt arrives after its `turn/start`, once. Each call below is one `workspace/changes` announcement, as a
+    // stop produces it, for the same prompt.
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 3 } })
+    userPrompt(svc, 'session-1', 3)
     const publish = seq => {
-      svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 3 } })
       svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 3 } })
       svc.changeService().entries.set(`session-1:${seq}`, { turn: 3, cwd: repo, files: [file('app.js')], total: 1, added: 1, deleted: 0 })
     }
@@ -211,7 +227,6 @@ test('a turn keeps its attestation across repeated stops while its files and con
     assert.equal(agent.steers.length, 1, 'a changed file inside the prompt must not speak again; the reopen waits for the next real user message')
     // The next real user prompt starts turn 4, which re-arms the one message and names the reopened repository.
     announce(svc, 'session-1', 4, 311, [file('app.js')], repo)
-    svc.publish('session-1', 'user/message', { id: 'prompt-4', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'continue' }] })
     await svc.stopping({ agent, turn: 4 })
     assert.equal(agent.steers.length, 2, 'the next real prompt sends one message about the reopened repository')
     assert.match(agent.steers[1].content[0].text, /Attestation: stale/)
@@ -328,8 +343,10 @@ test('a stop after a transient diff read failure rescans the same bytes and name
   try {
     const agent = agentFor(repo)
     const signal = new AbortController().signal
+    // One real prompt, then everything a stop produces for it. The prompt arrives after its `turn/start`.
+    svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 4 } })
+    userPrompt(svc, 'session-1', 4)
     const publish = seq => {
-      svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 4 } })
       svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 4 } })
       changes.entries.set(`session-1:${seq}`, { turn: 4, cwd: repo, files: [file('app.js')], total: 1, added: 1, deleted: 0 })
     }

@@ -62,8 +62,19 @@ function agentFor(cwd, id = 'session-1') {
   return { id, session: { header: { cwd }, events: [] }, steer: m => steers.push(m), followup: m => followups.push(m), steers, followups }
 }
 
+// The host appends the queued messages to its `turn/start`, the real user prompt included, before the first step.
+// The gate reads that prompt on the `session/event` hook, so every announced turn delivers one here.
+let promptCount = 0
+function userPrompt(svc, sessionId, turn) {
+  svc.publish({ id: sessionId }, 'user/message', {
+    id: `prompt-${sessionId}-${turn}-${++promptCount}`, role: 'user', source: { kind: 'user' },
+    content: [{ type: 'text', text: 'continue' }],
+  })
+}
+
 function announce(svc, sessionId, turn, seq, files) {
   svc.changes.observe({ id: sessionId }, { type: 'turn/start', data: { turn } })
+  userPrompt(svc, sessionId, turn)
   svc.changes.observe({ id: sessionId }, { type: 'workspace/changes', seq, data: { turn } })
   svc.changeService().entries.set(`${sessionId}:${seq}`, {
     turn, cwd: '/repo', files, total: files.length, added: files.length, deleted: 0,
@@ -113,6 +124,7 @@ test('the evaluation-error steer carries the producer-owned source kind', async 
   const svc = service()
   try {
     const agent = agentFor('')
+    userPrompt(svc, 'session-1', 4)
     await svc.stopping({ agent, turn: 4, signal: new AbortController().signal })
     assert.equal(agent.steers.length, 1, 'an evaluation failure must produce exactly one steer')
     const text = agent.steers[0].content.map(part => part.text).join('')
@@ -129,6 +141,7 @@ test('a zero nudge limit does not silence an evaluation-error steer', async t =>
   const svc = service({ settings: { verificationNudgeLimit: 0 } })
   try {
     const agent = agentFor('')
+    userPrompt(svc, 'session-1', 4)
     await svc.stopping({ agent, turn: 4, signal: new AbortController().signal })
     assert.equal(agent.steers.length, 1, 'a zero nudge limit must not silence the evaluation-error steer')
     assert.match(agent.steers[0].content.map(part => part.text).join(''), /could not evaluate the workspace/)

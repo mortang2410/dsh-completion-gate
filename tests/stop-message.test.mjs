@@ -83,7 +83,16 @@ function agentFor(cwd, { id = 'session-1', subagent = false } = {}) {
   return { id, session: { header }, steer: m => steers.push(m), followup: m => followups.push(m), steers, followups }
 }
 
-function begin(svc, agent, turn = TURN) { svc.publish(agent, 'turn/start', { turn }) }
+// The host opens every turn with `turn/start`, then appends the batch of queued messages for that turn, the real user
+// prompt included, before the first step. The gate reads that prompt on the `session/event` hook, so the harness
+// delivers the same sequence here and a stop never runs in a state the host cannot produce.
+function begin(svc, agent, turn = TURN) {
+  svc.publish(agent, 'turn/start', { turn })
+  svc.publish(agent, 'user/message', {
+    id: `prompt-${agent.id}-${turn}`, role: 'user', source: { kind: 'user' },
+    content: [{ type: 'text', text: 'continue' }],
+  })
+}
 
 // Announces one turn's change record the way the host does: the event, then the summary it serves for that sequence.
 function announce(svc, agent, { turn = TURN, cwd, files, total = files.length, diffs = null }) {
@@ -107,12 +116,12 @@ function stop(svc, agent, turn = TURN) {
   return svc.stopping({ agent, turn, signal: new AbortController().signal })
 }
 
-// A real user prompt reaches the hook as the turn's `user/message` with the host's `user` source kind. The gate's
-// own steer and premature-stop followup carry this plugin's source, and synthetic context carries its producer's,
-// so this event is the only thing that starts a prompt and re-arms the one-message bound.
+// A real user prompt reaches the hook as the turn's `user/message` with the host's `user` source kind. `begin`
+// already delivers the prompt that opens a turn, so this publishes only the extra prompts a test needs.
+let promptSeq = 0
 function prompt(svc, agent, turn = TURN) {
   svc.publish(agent, 'user/message', {
-    id: `prompt-${agent.id}-${turn}`, role: 'user', source: { kind: 'user' },
+    id: `prompt-${agent.id}-${turn}-${++promptSeq}`, role: 'user', source: { kind: 'user' },
     content: [{ type: 'text', text: 'continue' }],
   })
 }
@@ -480,11 +489,13 @@ test('a later turn without a real user prompt does not re-arm the advisory', asy
   const svc = service()
   const agent = agentFor(repo)
   begin(svc, agent, 3)
-  prompt(svc, agent, 3)
   announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
   await stop(svc, agent, 3)
   assert.equal(agent.steers.length, 1, 'precondition: the prompt spent its one message')
-  begin(svc, agent, 4)
+  // A later turn whose only user message carries another producer's kind, as a recovery followup or injected
+  // context does. `begin` opens the turn but delivers no real prompt, so the spent message stays spent.
+  svc.publish(agent, 'turn/start', { turn: 4 })
+  svc.publish(agent, 'user/message', { id: 'plugin-note', role: 'user', source: { kind: 'plugin:other' }, content: [{ type: 'text', text: 'context' }] })
   announce(svc, agent, { turn: 4, cwd: repo, files: ['app.js'] })
   await stop(svc, agent, 4)
   assert.equal(agent.steers.length, 1, 'a turn the user did not start must not re-arm the message')
@@ -726,23 +737,22 @@ test('a premature-stop recovery turn does not re-arm the advisory, even with the
   const agent = agentFor(repo)
   // The real prompt changes nothing, so its own stop has nothing to say and the one message stays unspent.
   begin(svc, agent, 3)
-  prompt(svc, agent, 3)
   // The model ends turn 3 while saying work is pending, so the guard queues its recovery followup straight away.
   svc.publish(agent, 'assistant/message', { turn: 3, message: { role: 'assistant', content: [{ type: 'text', text: 'Next I will run the suite.' }] } })
   await stop(svc, agent, 3)
   assert.equal(agent.followups.length, 1, 'precondition: a future-intent stop queues one recovery followup')
   assert.equal(agent.steers.length, 0, 'precondition: the prompt message is still unspent')
   // The followup opens the next host turn, and its message carries this plugin's source, so no real prompt starts.
-  // That turn owes real work, so a bound keyed on the turn number alone would speak here. The prompt is what bounds
-  // the message, so the recovery turn speaks the prompt's one message rather than a second one.
-  begin(svc, agent, 4)
+  // That turn owes real work, so a bound keyed on the turn alone would speak here. The prompt is what bounds the
+  // message, so the recovery turn speaks the prompt's one message rather than a second one.
+  svc.publish(agent, 'turn/start', { turn: 4 })
   const queued = svc.publish(agent, 'user/message', {
     id: 'followup', role: 'user', source: { kind: 'plugin:dsh-completion-gate' },
     content: [{ type: 'text', text: 'PREMATURE STOP RECOVERY: Continue the unfinished task.' }],
   })
   announce(svc, agent, { turn: 4, cwd: repo, files: ['app.js'] })
   assert.ok(Number.isInteger(queued), 'precondition: the followup message was published')
-  assert.equal(svc.state(agent).promptTurn, 3, 'precondition: the followup did not start a prompt')
+  assert.match(svc.state(agent).promptId, /^prompt-session-1-3/, 'precondition: the followup did not start a prompt')
   svc.publish(agent, 'assistant/message', { turn: 4, message: { role: 'assistant', content: [{ type: 'text', text: 'The suite passes.' }] } })
   // The recovery turn answers plainly, so the guard queues no second followup and the stop reaches the bound.
   await stop(svc, agent, 4)
@@ -886,4 +896,54 @@ test('a stop with nothing to say does not spend the prompt message', async () =>
   announce(svc, agent, { turn: 3, cwd: repo, files: [path.join(b, 'app.js')] })
   await stop(svc, agent, 3)
   assert.equal(agent.steers.length, 1, 'the first stop with something to say must carry the prompt message')
+})
+
+// A stop the host dispatched before any real user message armed the bound owes the one message later, so the first
+// prompt of the session is not swallowed as if the unarmed stop had spent it.
+test('a stop that arrives before any real user prompt does not spend the first prompt message', async () => {
+  const repo = changedRepo('unarmed')
+  const svc = service()
+  const agent = agentFor(repo)
+  svc.publish(agent, 'turn/start', { turn: 1 })
+  announce(svc, agent, { turn: 1, cwd: repo, files: ['app.js'] })
+  await stop(svc, agent, 1)
+  assert.equal(agent.steers.length, 0, 'precondition: no prompt has armed the bound, so the first stop speaks nothing')
+  prompt(svc, agent, 1)
+  announce(svc, agent, { turn: 1, cwd: repo, files: ['app.js'] })
+  await stop(svc, agent, 1)
+  assert.equal(agent.steers.length, 1, 'the first real prompt must still get its one message')
+})
+
+// The bound is one message per prompt, so a second real user message reaches the gate as a second prompt of the same
+// turn and must be able to speak, even though the turn number did not change.
+test('a second real user message in the same turn re-arms the bound', async () => {
+  const repo = changedRepo('same-turn')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent, 3)
+  prompt(svc, agent, 3)
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 1, 'precondition: the first prompt speaks')
+  svc.publish(agent, 'user/message', { id: 'prompt-3b', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'and now this' }] })
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 2, 'a second real prompt in the same turn must arm its own message')
+})
+
+// A real user message that carries no id still starts a prompt, so it re-arms the bound through the turn it opens.
+test('a real user message without an id re-arms the bound through its turn', async () => {
+  const repo = changedRepo('no-id')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent, 3)
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 1, 'precondition: the first prompt speaks')
+  svc.publish(agent, 'turn/start', { turn: 4 })
+  svc.publish(agent, 'user/message', { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'next' }] })
+  assert.equal(svc.state(agent).promptId, 'turn-4', 'precondition: the id-less prompt is named by the turn it opened')
+  announce(svc, agent, { turn: 4, cwd: repo, files: ['other.js'] })
+  await stop(svc, agent, 4)
+  assert.equal(agent.steers.length, 2, 'the id-less prompt must arm its own message')
 })

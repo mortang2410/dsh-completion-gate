@@ -265,7 +265,8 @@ test('a file filed under an outer repository moves to a nested repository create
 
 // The same move through a staged call. Attest and register run their report on a staged copy whose merged-turn map starts
 // empty, so the old turn is filed again inside the copy while the outer copy still holds the file. The adopted state must
-// hold the file under the nested root only, with the claim the outer copy held.
+// hold the file under the nested root only, with the claim the outer copy held, and its reviewed state must survive a
+// staged register and then clear on the move.
 test('a staged call after a nested repository appears leaves a file under the nested root only', async t => {
   const session = tempGitRepo(t)
   const nested = path.join(session, 'pkg')
@@ -279,8 +280,13 @@ test('a staged call after a nested repository appears leaves a file under the ne
   announceTurn(svc, a, summaries, 1, session, ['pkg/source.js'])
   await svc.__tool.execute({ action: 'status' }, execOf(a))
   svc.repositories.session(a.id).repos.get(session).files.get(file).claim = 'mine'
+  const attested = await svc.__tool.execute(attestArgs(session, { claims: [{ path: 'pkg/source.js', decision: 'mine' }], reviewed_code_files: ['pkg/source.js'], items: [] }), execOf(a))
+  assert.equal(attested.pass, true, attested.markdown)
+  await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Outer', proves: 'source.js sets value' }] }, execOf(a))
+  assert.ok((await linesOf(svc, a)).includes(`- ${file} (mine, reviewed)`), 'a staged register keeps the reviewed state the attestation stored')
   execFileSync('git', ['init', '-q', '.'], { cwd: nested })
   await svc.__tool.execute({ action: 'register', repository_root: nested, items: [{ name: 'Unit', proves: 'source.js sets value' }] }, execOf(a))
+  assert.ok((await linesOf(svc, a)).includes(`- ${file} (mine, unreviewed)`), 'the staged move leaves the file unreviewed under its new root')
   const owners = svc.repositories.repositories(a.id).flatMap(repo => repo.files.map(entry => ({ root: repo.root, absolute: entry.absolute, claim: entry.claim })))
   assert.deepEqual(owners, [{ root: nested, absolute: file, claim: 'mine' }])
 })

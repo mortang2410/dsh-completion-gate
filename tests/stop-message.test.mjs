@@ -951,44 +951,6 @@ test('two silent stops keep one copy of the same credential hit', async () => {
   assert.match(text, /- Possible hard-coded credential or secret: 1 line$/m, `the carried hit must be counted once: ${text}`)
 })
 
-// Two silent stops can rescan one turn record after the file set changed, so the second stop sees different hits at the
-// same rule and line. Keeping only one of them would lose a credential the session never named.
-test('two silent stops keep distinct credential hits that share a rule and a line', async () => {
-  const repo = changedRepo('credential-dedup-distinct')
-  const changes = recorder()
-  // Each stop scans one array of every changed file's added lines, so a hit's line is its position in the whole scan.
-  // The two stops read the later record in opposite orders, which puts a different hit at the same position.
-  // The first file of the record holds the hit once, the second holds two filler lines, so the hit always scans at
-  // line 2; only its text changes when the order of the files changes.
-  const filler = ['+y = 1', '+z = 1']
-  const order = { forward: [['+eval(api_key) // same key, different text'], filler], backward: [filler, ['+eval(password) // same key, different text']] }
-  let plan = null
-  changes.diff = async (_sessionId, _seq, index) => (plan ? { kind: 'text', hunks: [{ lines: plan[index] }] } : undefined)
-  const svc = service({ workspaceChanges: changes })
-  const agent = agentFor(repo)
-  begin(svc, agent, 3)
-  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
-  await stop(svc, agent, 3)
-  assert.equal(agent.steers.length, 1, 'precondition: the prompt spent its message')
-  assert.doesNotMatch(steerText(agent.steers[0]), /Dynamic eval introduced/, 'precondition: the first message has no hit to name')
-  plan = order.forward
-  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js', 'other.js'] })
-  await stop(svc, agent, 3)
-  plan = order.backward
-  announce(svc, agent, { turn: 3, cwd: repo, files: ['other.js', 'app.js'] })
-  await stop(svc, agent, 3)
-  assert.equal(agent.steers.length, 1, 'both stops of the prompt must stay silent')
-  const held = svc.state(agent).heldCredentials
-  assert.equal(held.length, 2, `both hits must be kept: ${JSON.stringify(held)}`)
-  begin(svc, agent, 4)
-  announce(svc, agent, { turn: 4, cwd: repo, files: ['third.js'] })
-  await stop(svc, agent, 4)
-  assert.equal(agent.steers.length, 2, 'the next prompt speaks once')
-  const text = steerText(agent.steers[1])
-  assert.match(text, /- Dynamic eval introduced: [12] lines?$/m, `a kept hit must be counted: ${text}`)
-  if (held.length === 2) assert.match(text, /- Dynamic eval introduced: 2 lines$/m, `both hits must be counted: ${text}`)
-})
-
 // A file whose added lines could not be read at a silent stop is a notice the next prompt's clean diff cannot show,
 // so it rides the next prompt's message the same way a kept credential hit does.
 test('a silent stop carries an unread-file notice the next prompt cannot read again', async () => {

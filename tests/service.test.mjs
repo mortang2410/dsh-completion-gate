@@ -291,6 +291,31 @@ test('a staged call after a nested repository appears leaves a file under the ne
   assert.deepEqual(owners, [{ root: nested, absolute: file, claim: 'mine' }])
 })
 
+// The turn record is what lets a staged copy re-file the turn; when the host no longer has it, the copy keeps the file
+// under its old root and only the owner pass can move it. That is the staged path through reroot, so the destination must
+// read unreviewed there.
+test('a staged call with an unavailable turn record moves the file through reroot and clears its reviewed state', async t => {
+  const session = tempGitRepo(t)
+  const nested = path.join(session, 'pkg')
+  fs.mkdirSync(nested)
+  const file = path.join(nested, 'source.js')
+  fs.writeFileSync(file, 'export const value = 1\n')
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  const seq = announceTurn(svc, a, summaries, 1, session, ['pkg/source.js'])
+  await svc.__tool.execute({ action: 'status' }, execOf(a))
+  svc.repositories.session(a.id).repos.get(session).files.get(file).claim = 'mine'
+  const attested = await svc.__tool.execute(attestArgs(session, { claims: [{ path: 'pkg/source.js', decision: 'mine' }], reviewed_code_files: ['pkg/source.js'], items: [] }), execOf(a))
+  assert.equal(attested.pass, true, attested.markdown)
+  assert.ok((await linesOf(svc, a)).includes(`- ${file} (mine, reviewed)`), 'precondition: the file is reviewed under the outer root')
+  summaries.delete(`${a.id}:${seq}`)
+  execFileSync('git', ['init', '-q', '.'], { cwd: nested })
+  await svc.__tool.execute({ action: 'register', repository_root: nested, items: [{ name: 'Unit', proves: 'source.js sets value' }] }, execOf(a))
+  assert.ok((await linesOf(svc, a)).includes(`- ${file} (mine, unreviewed)`), 'the reroot move clears the reviewed state at the destination')
+})
+
 test('a session outside any git repository gets a notice that its change record covers file-tool edits only', async t => {
   const plain = tempPlainDir(t)
   const summaries = new Map()

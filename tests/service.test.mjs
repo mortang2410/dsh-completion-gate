@@ -1,4 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';import crypto from 'node:crypto';import{execFileSync}from'node:child_process';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import{fileURLToPath}from'node:url';import{CompletionGateService}from'../lib/index.js';import{attestSchemaErrors}from'../lib/tracker.js'
+import { userMessage } from './user-message.mjs'
 // The first argument is kept for existing call sites and ignored: turn events reach the gate through the session/event hook.
 function agent(_events=[],header={cwd:process.cwd()}){const steers=[],followups=[];return{id:'a',session:{header},steer:m=>steers.push(m),followup:m=>followups.push(m),steers,followups}}
 const ctx={}
@@ -9,7 +10,6 @@ function cleanupService(instance){if(instance?.__testSettingsDir)fs.rmSync(insta
 // The gate started against a stub host. Turn events are published through its session/event hook, the way dsh-session
 // publishes them: the session first, then { type, seq, time, data }.
 let published=0
-let promptSeq=0
 function liveService(config={}){const listeners=new Map();const off=()=>()=>{};const host={reflect:{get:()=>undefined},on:(name,listener)=>{listeners.set(name,listener);return off()},provide:off,tools:{register:off},commands:{register:off},systemPrompt:{section:off},webServer:{register:off}};const svc=service(host,config);svc.__listeners=listeners;svc.start();return svc}
 function emit(svc,agentRef,type,data){svc.__listeners.get('session/event')({id:agentRef.id},{type,seq:++published,time:Date.now(),data})}
 
@@ -170,7 +170,7 @@ function tempPlainDir(t){const dir=makeWorkDir('plain-');t.after(()=>fs.rmSync(d
 function tempGitRepo(t){const dir=makeWorkDir('status-');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));execFileSync('git',['init','-q','.'],{cwd:dir});fs.writeFileSync(path.join(dir,'app.js'),'const value = 1\n');return dir}
 function statusService(summaries,config={}){const listeners=new Map();const tools={};const commands={};const off=()=>()=>{};const reflect=summaries?{get:name=>name==='workspaceChanges'?{summary:(id,seq)=>summaries.get(`${id}:${seq}`)}:undefined}:{get:()=>undefined};const host={reflect,on:(name,listener)=>{listeners.set(name,listener);return off()},provide:off,tools:{register:definition=>{tools.completion_gate=definition;return off()}},commands:{register:definition=>{commands[definition.name]=definition;return off()}},systemPrompt:{section:off},webServer:{register:off}};const svc=service(host,config,workRoot);svc.__listeners=listeners;svc.start();svc.__tool=tools.completion_gate;svc.__commands=commands;return svc}
 // One turn as the host publishes it: the turn starts, then its change record is announced under a sequence number that keys the summary.
-function userPrompt(svc,a,turn){emit(svc,a,'user/message',{id:`prompt-${a.id}-${turn}-${++promptSeq}`,role:'user',source:{kind:'user'},content:[{type:'text',text:'continue'}]})}
+function userPrompt(svc,a,turn){emit(svc,a,'user/message',userMessage(a.id,turn))}
 function announceTurn(svc,a,summaries,turn,cwd,paths){emit(svc,a,'turn/start',{turn});userPrompt(svc,a,turn);const seq=published+1;summaries.set(`${a.id}:${seq}`,{turn,cwd,files:paths.map(p=>({path:p,display:p,added:1,deleted:0})),total:paths.length,added:paths.length,deleted:0});emit(svc,a,'workspace/changes',{turn});return seq}
 
 test('status lists every repository the session changed, each with its catalog path and files', async t => {

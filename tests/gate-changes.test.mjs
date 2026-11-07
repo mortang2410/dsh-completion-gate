@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { CompletionGateService } from '../lib/index.js'
 import { contentKey, isDocumentationPath } from '../lib/changes.js'
+import { userMessage } from './user-message.mjs'
 
 // These tests drive the real service, so they fail if the gate goes back to a source that
 // cannot separate the user's pre-existing uncommitted work from a change this session made.
@@ -69,16 +70,11 @@ function agentFor(cwd, id = 'session-1') {
   return { id, session: { header: { cwd }, events: [] }, steer: m => steers.push(m), followup: m => followups.push(m), steers, followups }
 }
 
-let promptCount = 0
-
 // The host appends the batch of queued messages to its `turn/start`, the real user prompt included, before the first
 // step. The gate reads that prompt on the `session/event` hook, so one message is delivered here for every turn
 // opened, and a stop never runs in a state the host cannot produce.
 function userPrompt(svc, sessionId, turn) {
-  svc.publish(sessionId, 'user/message', {
-    id: `prompt-${sessionId}-${turn}-${++promptCount}`, role: 'user', source: { kind: 'user' },
-    content: [{ type: 'text', text: 'continue' }],
-  })
+  svc.publish(sessionId, 'user/message', userMessage(sessionId, turn))
 }
 
 // Announce one `workspace/changes` event the way the host recorder does, and register the

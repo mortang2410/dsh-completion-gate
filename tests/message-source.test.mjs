@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CompletionGateService } from '../lib/index.js'
+import { userMessage } from './user-message.mjs'
 
 // The host refuses any durable message whose source.kind is the bare string 'plugin'
 // ("format v4 message requires a producer-owned source kind", session-format-v3-to-v4
@@ -64,12 +65,8 @@ function agentFor(cwd, id = 'session-1') {
 
 // The host appends the queued messages to its `turn/start`, the real user prompt included, before the first step.
 // The gate reads that prompt on the `session/event` hook, so every announced turn delivers one here.
-let promptCount = 0
 function userPrompt(svc, sessionId, turn) {
-  svc.publish({ id: sessionId }, 'user/message', {
-    id: `prompt-${sessionId}-${turn}-${++promptCount}`, role: 'user', source: { kind: 'user' },
-    content: [{ type: 'text', text: 'continue' }],
-  })
+  svc.publish({ id: sessionId }, 'user/message', userMessage(sessionId, turn))
 }
 
 function announce(svc, sessionId, turn, seq, files) {

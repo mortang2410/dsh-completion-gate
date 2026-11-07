@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { CompletionGateService } from '../lib/index.js'
+import { userMessage } from './user-message.mjs'
 
 // The stop message of ticket personal#3nm5. At a stop the gate sends at most one advisory steer, covering every repository
 // the session changed that still has unfinished work. The stop path runs no project check, so a test script in a
@@ -88,10 +89,7 @@ function agentFor(cwd, { id = 'session-1', subagent = false } = {}) {
 // delivers the same sequence here and a stop never runs in a state the host cannot produce.
 function begin(svc, agent, turn = TURN) {
   svc.publish(agent, 'turn/start', { turn })
-  svc.publish(agent, 'user/message', {
-    id: `prompt-${agent.id}-${turn}`, role: 'user', source: { kind: 'user' },
-    content: [{ type: 'text', text: 'continue' }],
-  })
+  svc.publish(agent, 'user/message', userMessage(agent.id, turn))
 }
 
 // Announces one turn's change record the way the host does: the event, then the summary it serves for that sequence.
@@ -118,12 +116,8 @@ function stop(svc, agent, turn = TURN) {
 
 // A real user prompt reaches the hook as the turn's `user/message` with the host's `user` source kind. `begin`
 // already delivers the prompt that opens a turn, so this publishes only the extra prompts a test needs.
-let promptSeq = 0
 function prompt(svc, agent, turn = TURN) {
-  svc.publish(agent, 'user/message', {
-    id: `prompt-${agent.id}-${turn}-${++promptSeq}`, role: 'user', source: { kind: 'user' },
-    content: [{ type: 'text', text: 'continue' }],
-  })
+  svc.publish(agent, 'user/message', userMessage(agent.id, turn))
 }
 
 function steerText(steer) { return steer.content.map(part => part.text).join('') }

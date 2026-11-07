@@ -95,6 +95,7 @@ function begin(svc, agent, turn = TURN) {
 // Announces one turn's change record the way the host does: the event, then the summary it serves for that sequence.
 function announce(svc, agent, { turn = TURN, cwd, files, total = files.length, diffs = null }) {
   const seq = svc.publish(agent, 'workspace/changes', { turn })
+  svc.changeService().diffs.delete(`${agent.id}:${seq}`)
   svc.changeService().entries.set(`${agent.id}:${seq}`, {
     turn, cwd, files: files.map(p => ({ path: p, display: p, added: 1, deleted: 0 })), total, added: files.length, deleted: 0,
   })
@@ -923,4 +924,82 @@ test('a second real user message in the same turn re-arms the bound', async () =
   announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
   await stop(svc, agent, 3)
   assert.equal(agent.steers.length, 2, 'a second real prompt in the same turn must arm its own message')
+})
+
+// Two silent stops of one prompt rescan the same turn record. The kept hit must name the credential once, not once
+// per stop, and the next prompt's own clean diff adds nothing.
+test('two silent stops keep one copy of the same credential hit', async () => {
+  const repo = changedRepo('credential-dedup')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent, 3)
+  // The prompt's own stop reports unclaimed work, so it spends the one message before any hit exists.
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'], diffs: [[]] })
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 1, 'precondition: the prompt spent its message')
+  assert.doesNotMatch(steerText(agent.steers[0]), /Possible hard-coded credential/, 'precondition: the first message has no hit to name')
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'], diffs: [['+password = "hunter2hunter2"']] })
+  await stop(svc, agent, 3)
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 1, 'both stops of the prompt must stay silent')
+  begin(svc, agent, 4)
+  announce(svc, agent, { turn: 4, cwd: repo, files: ['other.js'], diffs: [[]] })
+  await stop(svc, agent, 4)
+  assert.equal(agent.steers.length, 2, 'the next prompt speaks once')
+  // The message counts hits by rule, so one kept hit reads as one line, not as two.
+  const text = steerText(agent.steers[1])
+  assert.match(text, /- Possible hard-coded credential or secret: 1 line$/m, `the carried hit must be counted once: ${text}`)
+})
+
+// A file whose added lines could not be read at a silent stop is a notice the next prompt's clean diff cannot show,
+// so it rides the next prompt's message the same way a kept credential hit does.
+test('a silent stop carries an unread-file notice the next prompt cannot read again', async () => {
+  const repo = changedRepo('gap-carried')
+  writeCatalog(repo, ['unit'])
+  // Every read fails until the next prompt opens, so the unread file exists only in what the gate kept. The flips
+  // the read off just before the prompt that must carry it.
+  const changes = recorder()
+  let failing = true
+  changes.diff = async () => (failing ? Promise.reject(new Error('transient read failure')) : { kind: 'text', hunks: [{ lines: [] }] })
+  const svc = service({ workspaceChanges: changes })
+  const agent = agentFor(repo)
+  begin(svc, agent, 3)
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 1, 'precondition: the first stop sent the advisory')
+  assert.match(steerText(agent.steers[0]), /1 changed file could not be read for this scan/, 'precondition: the first message already named the unread file')
+  assert.equal(agent.steers.length, 1, 'precondition: the prompt spent its message on the unread file')
+  // The repository is complete now. The host drops turn 3's saved diffs, so the report re-reads that turn cleanly and
+  // the only way the unread file can be named again is the copy the bound kept.
+  changes.diffs.clear()
+  await svc.attest(agent, { repository_root: repo, claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'], items: [{ id: 'unit', state: 'passed' }] })
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 1, 'a stop over an attested, unchanged set must stay silent')
+  failing = false
+  begin(svc, agent, 4)
+  announce(svc, agent, { turn: 4, cwd: repo, files: ['other.js'] })
+  await stop(svc, agent, 4)
+  assert.equal(agent.steers.length, 2, 'the next prompt speaks once')
+  const text = steerText(agent.steers[1])
+  assert.match(text, /1 changed file could not be read for this scan/, `the kept unread file must be named at the next prompt: ${text}`)
+  assert.match(text, /- file #0: transient read failure$/m, 'the kept unread file must be listed on its own line')
+})
+
+
+// The turn's changed lines are readable even when the repository report throws, so a credential in them is named now
+// rather than lost with the error notice.
+test('a credential is named even when the repository report fails', async () => {
+  const repo = changedRepo('credential-report-failure')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent, 3)
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'], diffs: [['+password = "hunter2hunter2"']] })
+  const report = svc.repositoryReport
+  svc.repositoryReport = async () => { throw new Error('report failure') }
+  try { await stop(svc, agent, 3) } finally { svc.repositoryReport = report }
+  assert.equal(agent.steers.length, 1, 'an evaluation failure still sends its one message')
+  const text = steerText(agent.steers[0])
+  assert.match(text, /could not evaluate the workspace/, 'the failure is still named')
+  assert.match(text, /Possible hard-coded credential or secret/, 'the readable changed lines must still be scanned')
 })

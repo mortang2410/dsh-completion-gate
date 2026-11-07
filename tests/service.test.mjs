@@ -367,6 +367,7 @@ test('a disposed session forgets its repositories', async t => {
   const before = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
   assert.match(before.markdown, /^### /m, 'the session must hold a repository before it is disposed')
   svc.__listeners.get('session/disposed')({ id: a.id })
+  assert.equal(svc.states.has(a.id), false, 'disposal must forget the session state, not only its repositories')
   const after = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
   assert.doesNotMatch(after.markdown, /^### /m)
 })

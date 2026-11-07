@@ -61,7 +61,7 @@ test('updateSettings keeps this session claims and attestation; only stop bookke
   svc.updateSettings({ maxChangedFiles: 400 })
   assert.equal(svc.config.maxChangedFiles, 400, 'precondition: the setting applied')
   const lines = await linesOf(svc, a)
-  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine)`), 'the claim survives a settings change')
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine, reviewed)`), 'the claim survives a settings change')
   assert.ok(lines.includes('Attestation: current'), 'the attestation survives a settings change')
 })
 
@@ -188,7 +188,7 @@ test('status lists every repository the session changed, each with its catalog p
   for (const repo of [session, sibling]) {
     assert.ok(lines.includes(`Root: ${repo}`), `missing root line for ${repo}`)
     assert.ok(lines.includes(`Catalog: ${path.join(repo, '.dsh', 'verification.json')}`), `missing catalog line for ${repo}`)
-    assert.ok(lines.includes(`- ${path.join(repo, 'app.js')} (unclaimed)`), `missing file line under ${repo}`)
+    assert.ok(lines.includes(`- ${path.join(repo, 'app.js')} (unclaimed, unreviewed)`), `missing file line under ${repo}`)
   }
 })
 
@@ -217,7 +217,7 @@ test('the gate-status command shows the repositories', async t => {
   const lines = result.text.split('\n')
   assert.ok(lines.includes(`Root: ${session}`), result.text)
   assert.ok(lines.includes(`Catalog: ${path.join(session, '.dsh', 'verification.json')}`), `missing catalog line: ${result.text}`)
-  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed)`), `missing file line: ${result.text}`)
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed, unreviewed)`), `missing file line: ${result.text}`)
 })
 
 test('status fixtures keep their settings directory under the task root, not the system temporary directory', t => {
@@ -468,8 +468,8 @@ test('attest stores mine and not-mine claims and item states, and status shows t
   assert.equal(result.pass, true, result.markdown)
   assert.deepEqual(result.blockers, [])
   const lines = await linesOf(svc, a)
-  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine)`), 'the mine claim is stored')
-  assert.ok(lines.includes(`- ${path.join(session, 'other.js')} (not-mine)`), 'the not-mine claim is stored')
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine, reviewed)`), 'the mine claim is stored')
+  assert.ok(lines.includes(`- ${path.join(session, 'other.js')} (not-mine, unreviewed)`), 'the not-mine claim is stored')
   assert.ok(lines.includes('- unit: Unit | passed'), 'the passed item state is stored')
   assert.ok(lines.includes('Attestation: current'))
   assert.ok(lines.includes('Status: complete'))
@@ -503,7 +503,7 @@ test('a valid but incomplete attest is stored and returns its problems', async t
   assert.ok(result.blockers.some(p => p.startsWith('Claimed code files not reviewed:') && p.includes(path.join(session, 'app.js'))), result.markdown)
   assert.ok(result.blockers.includes('Catalog item not stated: unit (Unit).'), result.markdown)
   const lines = await linesOf(svc, a)
-  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine)`), 'the incomplete attest stored its claim')
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine, unreviewed)`), 'the incomplete attest stored its claim')
   assert.ok(lines.includes('Attestation: current'), 'the incomplete attest is stored')
   assert.ok(lines.includes('Status: unfinished'))
 })
@@ -554,7 +554,7 @@ test('a refused attest changes nothing, even when a newer turn record is pending
   }
   assert.equal(JSON.stringify(svc.repositories.repositories(a.id)), before, 'a refused attest changes no claim, item state, or attestation')
   const lines = await linesOf(svc, a)
-  assert.ok(lines.includes(`- ${path.join(session, 'other.js')} (unclaimed)`), 'the pending turn is filed by the next read')
+  assert.ok(lines.includes(`- ${path.join(session, 'other.js')} (unclaimed, unreviewed)`), 'the pending turn is filed by the next read')
   assert.ok(lines.includes('Attestation: missing'), 'the next read drops the attestation, since a changed file reopens the repository')
 })
 
@@ -585,8 +585,9 @@ test('a later attest that names only items replaces the reviewed list and docs c
     `Changed documentation not checked: ${path.join(session, 'NOTES.md')}. Check each for staleness, bloat, and conflicting information, then attest with docs_checked true.`,
   ])
   const lines = await linesOf(svc, a)
-  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine)`), 'the earlier mine claim is kept')
-  assert.ok(lines.includes(`- ${path.join(session, 'other.js')} (not-mine)`), 'the earlier not-mine claim is kept')
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine, unreviewed)`), 'the earlier mine claim is kept, and the replaced reviewed list leaves the file unreviewed')
+  assert.ok(lines.includes(`- ${path.join(session, 'other.js')} (not-mine, unreviewed)`), 'the earlier not-mine claim is kept')
+  assert.ok(lines.includes(`- ${path.join(session, 'NOTES.md')} (mine, unreviewed)`), 'the replaced documentation check leaves the document unreviewed')
 })
 
 test('two attest calls that overlap on one session both keep their claims', async t => {
@@ -596,8 +597,8 @@ test('two attest calls that overlap on one session both keep their claims', asyn
     svc.__tool.execute(attestArgs(session, { claims: [{ path: 'other.js', decision: 'not-mine' }] }), execOf(a)),
   ])
   const lines = await linesOf(svc, a)
-  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine)`), 'the claim from the first call survives the second call')
-  assert.ok(lines.includes(`- ${path.join(session, 'other.js')} (not-mine)`), 'the claim from the second call is stored')
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine, unreviewed)`), 'the claim from the first call survives the second call')
+  assert.ok(lines.includes(`- ${path.join(session, 'other.js')} (not-mine, unreviewed)`), 'the claim from the second call is stored')
 })
 
 test('a register that overlaps an attest on one session keeps the claim the attest stored', async t => {
@@ -615,7 +616,7 @@ test('a register that overlaps an attest on one session keeps the claim the atte
     svc.__tool.execute(attestArgs(session, { claims: [{ path: 'app.js', decision: 'mine' }] }), execOf(a)),
   ])
   const lines = await linesOf(svc, a)
-  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine)`), 'the claim from the attest survives the overlapping register')
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine, unreviewed)`), 'the claim from the attest survives the overlapping register')
 })
 
 test('a changed documentation file is a problem until docs_checked is true', async t => {
@@ -636,7 +637,7 @@ test('an assumed item without a reason is stored as unfinished and named as a pr
   assert.equal(noReason.pass, false, noReason.markdown)
   assert.ok(noReason.blockers.some(p => p.startsWith('unit is marked assumed but has no reason, so it stays unfinished.')), noReason.markdown)
   const stored = await linesOf(svc, a)
-  assert.ok(stored.includes(`- ${path.join(session, 'app.js')} (mine)`), 'the claim of the same call is stored')
+  assert.ok(stored.includes(`- ${path.join(session, 'app.js')} (mine, reviewed)`), 'the claim of the same call is stored')
   assert.ok(stored.includes('- unit: Unit | not stated'), 'the reasonless item is unfinished')
   assert.ok(stored.includes('Status: unfinished'))
 
@@ -667,7 +668,7 @@ test('changing a recorded file after attestation reopens the repository: claims 
   fs.writeFileSync(path.join(session, 'app.js'), 'const value = 2\n')
   const lines = await linesOf(svc, a)
   assert.ok(lines.some(line => line.startsWith('Notice: Repository ') && line.includes(`${session} changed after its attestation`)), 'the reopen is named')
-  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed)`), 'the claim is reset')
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed, unreviewed)`), 'the claim is reset')
   assert.ok(lines.includes('- unit: Unit | not stated'), 'the item state is cleared')
   assert.ok(lines.includes('Attestation: missing'), 'the attestation is dropped')
 })
@@ -680,8 +681,8 @@ test('a new recorded path after attestation reopens the repository', async t => 
   announceTurn(svc, a, summaries, 2, session, ['new.js'])
   const lines = await linesOf(svc, a)
   assert.ok(lines.some(line => line.startsWith('Notice: Repository ') && line.includes(`${session} changed after its attestation`)), 'the new path reopens the repository')
-  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed)`), 'the earlier claim is reset')
-  assert.ok(lines.includes(`- ${path.join(session, 'new.js')} (unclaimed)`), 'the new path is listed unclaimed')
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed, unreviewed)`), 'the earlier claim is reset')
+  assert.ok(lines.includes(`- ${path.join(session, 'new.js')} (unclaimed, unreviewed)`), 'the new path is listed unclaimed')
   assert.ok(lines.includes('Attestation: missing'))
 })
 
@@ -705,7 +706,7 @@ test('an outer repository whose only changed file moves into a nested repository
   const next = lines.findIndex((line, i) => i > outerAt && line.startsWith('Root: '))
   const outer = lines.slice(outerAt, next === -1 ? lines.length : next)
   assert.ok(outer.includes('Status: complete'), `the emptied outer repository is not unfinished:\n${outer.join('\n')}`)
-  assert.ok(lines.includes(`- ${file} (mine)`), 'the nested repository keeps the mine claim')
+  assert.ok(lines.includes(`- ${file} (mine, unreviewed)`), 'the nested repository keeps the mine claim, and the move leaves the file unreviewed there')
   assert.ok(lines.includes(`Notice: Repository ${session} changed after its attestation, so its claims and item states were cleared and the attestation was dropped.`), 'a reopen with no unrelated mark keeps the wording it always had')
 })
 
@@ -805,7 +806,7 @@ test('the gate command shows the session report', async t => {
   announceTurn(svc, a, summaries, 1, session, ['app.js'])
   const result = await svc.__commands.gate.handler({ agent: a, rawInput: '' })
   assert.equal(result.kind, 'success')
-  assert.ok(result.text.split('\n').includes(`- ${path.join(session, 'app.js')} (unclaimed)`), result.text)
+  assert.ok(result.text.split('\n').includes(`- ${path.join(session, 'app.js')} (unclaimed, unreviewed)`), result.text)
   assert.doesNotMatch(result.text, /PASS|BLOCKED|No check has run|Machine evidence/)
 })
 
@@ -832,10 +833,10 @@ test('gate-reset clears this session claims and leaves the repository catalog an
   const catalog = path.join(session, '.dsh', 'verification.json')
   const catalogBefore = fs.readFileSync(catalog, 'utf8')
   const fileBefore = fs.readFileSync(path.join(session, 'app.js'), 'utf8')
-  assert.ok((await linesOf(svc, a)).includes(`- ${path.join(session, 'app.js')} (mine)`), 'precondition: the claim is recorded')
+  assert.ok((await linesOf(svc, a)).includes(`- ${path.join(session, 'app.js')} (mine, unreviewed)`), 'precondition: the claim is recorded')
   await svc.__commands['gate-reset'].handler({ agent: a, rawInput: '' })
   const lines = await linesOf(svc, a)
-  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed)`), 'the reset must drop this session claim')
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed, unreviewed)`), 'the reset must drop this session claim')
   assert.equal(fs.readFileSync(catalog, 'utf8'), catalogBefore, 'the reset must not touch the catalog')
   assert.equal(fs.readFileSync(path.join(session, 'app.js'), 'utf8'), fileBefore, 'the reset must not touch the files')
 })

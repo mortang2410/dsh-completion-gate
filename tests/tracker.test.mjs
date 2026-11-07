@@ -211,7 +211,7 @@ test('a reopen keeps the unrelated mark while the passed and assumed states are 
 
   fs.writeFileSync(path.join(session, 'app.js'), 'const value = 2\n')
   const lines = await linesOf(svc, a)
-  assert.ok(lines.some(line => line.startsWith('Notice: Repository ') && line.includes(`${session} changed after its attestation`)), 'the edited file reopens the repository')
+  assert.ok(lines.includes(`Notice: Repository ${session} changed after its attestation, so its claims and item states were cleared except those marked unrelated, and the attestation was dropped.`), 'the reopen notice names the cleared states and the exception it kept')
   assert.ok(lines.includes('- unit: Unit | not stated'), 'the passed state is cleared by the reopen')
   assert.ok(lines.includes('- browser: Browser | not stated'), 'the assumed state is cleared by the reopen')
   assert.ok(lines.includes('- audit: Audit | unrelated to this session'), 'the unrelated mark survives the reopen')

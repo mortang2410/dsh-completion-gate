@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import crypto from 'node:crypto';import{execFileSync}from'node:child_process';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import{fileURLToPath}from'node:url';import{CompletionGateService}from'../lib/index.js'
+import test from 'node:test';import assert from 'node:assert/strict';import crypto from 'node:crypto';import{execFileSync}from'node:child_process';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import{fileURLToPath}from'node:url';import{CompletionGateService}from'../lib/index.js';import{attestSchemaErrors}from'../lib/tracker.js'
 // The first argument is kept for existing call sites and ignored: turn events reach the gate through the session/event hook.
 function agent(_events=[],header={cwd:process.cwd()}){const steers=[],followups=[];return{id:'a',session:{header},steer:m=>steers.push(m),followup:m=>followups.push(m),steers,followups}}
 const ctx={}
@@ -704,7 +704,7 @@ test('an outer repository whose only changed file moves into a nested repository
   const outer = lines.slice(outerAt, next === -1 ? lines.length : next)
   assert.ok(outer.includes('Status: complete'), `the emptied outer repository is not unfinished:\n${outer.join('\n')}`)
   assert.ok(lines.includes(`- ${file} (mine)`), 'the nested repository keeps the mine claim')
-  assert.ok(lines.includes(`Notice: Repository ${session} changed after its attestation, so its claims and passed or assumed item states were cleared and the attestation was dropped.`), 'the reopen notice for the emptied repository states only the change, with no next step')
+  assert.ok(lines.includes(`Notice: Repository ${session} changed after its attestation, so its claims and item states were cleared and the attestation was dropped.`), 'a reopen with no unrelated mark keeps the wording it always had')
 })
 
 test('an emptied outer repository that still has catalog items keeps its missing attestation as a problem', async t => {
@@ -753,6 +753,17 @@ test('the completion_gate item state enum takes passed, assumed, and unrelated',
   const svc = statusService(new Map())
   t.after(() => cleanupService(svc))
   assert.deepEqual([...svc.__tool.parameters.properties.items.items.properties.state.enum].sort(), ['assumed', 'passed', 'unrelated'])
+})
+
+// The tool schema and the attest handler must accept the same item states, because a state the schema advertises and the
+// handler refuses is a call the model cannot make. One exported list feeds both, so a state is added to both or neither.
+test('the item state enum and the attest validator accept the same states', t => {
+  const svc = statusService(new Map())
+  t.after(() => cleanupService(svc))
+  const states = svc.__tool.parameters.properties.items.items.properties.state.enum
+  for (const state of states) {
+    assert.deepEqual(attestSchemaErrors({ repository_root: process.cwd(), items: [{ id: 'unit', state }] }), [], `the handler accepts the advertised state ${state}`)
+  }
 })
 
 // Retired surface (personal#dr0t). The tool has three actions, and no command runs a check.

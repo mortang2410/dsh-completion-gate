@@ -147,6 +147,71 @@ test('status names a claimed code file that is not reviewed, and an unreadable c
   })
 })
 
+// Ticket personal#tz9r: the reviewed state beside the claim. Every recorded file starts unreviewed, the attestation is the
+// only thing that marks a review, the latest attestation decides, and reopening clears the state with the claims.
+test('every recorded changed file starts unreviewed, and status prints its claim and reviewed state', async t => {
+  const { session, svc, a } = await attestFixture(t, ['app.js', 'notes.md'])
+  const lines = await linesOf(svc, a)
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed, unreviewed)`), `the code file starts unreviewed:\n${lines.join('\n')}`)
+  assert.ok(lines.includes(`- ${path.join(session, 'notes.md')} (unclaimed, unreviewed)`), 'the documentation file starts unreviewed')
+})
+
+test('attest reviews its reviewed code files, and a true documentation check reviews the documentation files', async t => {
+  const { session, svc, a } = await attestFixture(t, ['app.js', 'notes.md'])
+  const app = path.join(session, 'app.js')
+  const notes = path.join(session, 'notes.md')
+  const unchecked = await svc.__tool.execute(attestArgs(session, {
+    claims: [{ path: 'app.js', decision: 'mine' }, { path: 'notes.md', decision: 'mine' }],
+    reviewed_code_files: ['app.js'], docs_checked: false, items: [{ id: 'unit', state: 'passed' }],
+  }), execOf(a))
+  assert.deepEqual(unchecked.blockers, [`Changed documentation not checked: ${notes}. Check each for staleness, bloat, and conflicting information, then attest with docs_checked true.`])
+  const before = await linesOf(svc, a)
+  assert.ok(before.includes(`- ${app} (mine, reviewed)`), `the reviewed code file is reviewed:\n${before.join('\n')}`)
+  assert.ok(before.includes(`- ${notes} (mine, unreviewed)`), 'a false documentation check leaves the document unreviewed')
+
+  const checked = await svc.__tool.execute(attestArgs(session, { reviewed_code_files: ['app.js'], docs_checked: true, items: [{ id: 'unit', state: 'passed' }] }), execOf(a))
+  assert.deepEqual(checked.blockers, [], checked.markdown)
+  const after = await linesOf(svc, a)
+  assert.ok(after.includes(`- ${notes} (mine, reviewed)`), 'a true documentation check reviews the document')
+})
+
+test('the latest attestation decides, so a file it does not cover is unreviewed again', async t => {
+  const { session, svc, a } = await attestFixture(t, ['app.js', 'other.js'])
+  const app = path.join(session, 'app.js')
+  const other = path.join(session, 'other.js')
+  const both = await svc.__tool.execute(attestArgs(session, {
+    claims: [{ path: 'app.js', decision: 'mine' }, { path: 'other.js', decision: 'mine' }],
+    reviewed_code_files: ['app.js', 'other.js'], items: [{ id: 'unit', state: 'passed' }],
+  }), execOf(a))
+  assert.equal(both.pass, true, both.markdown)
+  assert.ok((await linesOf(svc, a)).includes(`- ${other} (mine, reviewed)`), 'precondition: the first attestation covered other.js')
+
+  const later = await svc.__tool.execute(attestArgs(session, { reviewed_code_files: ['app.js'], items: [{ id: 'unit', state: 'passed' }] }), execOf(a))
+  assert.deepEqual(later.blockers, [`Claimed code files not reviewed: ${other}.`])
+  const lines = await linesOf(svc, a)
+  assert.ok(lines.includes(`- ${app} (mine, reviewed)`), 'a file the latest attestation covers stays reviewed')
+  assert.ok(lines.includes(`- ${other} (mine, unreviewed)`), `a file the latest attestation does not cover is unreviewed:\n${lines.join('\n')}`)
+})
+
+test('reopening clears every file reviewed state with the claims', async t => {
+  const { session, svc, a } = await attestFixture(t, ['app.js', 'notes.md'])
+  const app = path.join(session, 'app.js')
+  const notes = path.join(session, 'notes.md')
+  const done = await svc.__tool.execute(attestArgs(session, {
+    claims: [{ path: 'app.js', decision: 'mine' }, { path: 'notes.md', decision: 'mine' }],
+    reviewed_code_files: ['app.js'], docs_checked: true, items: [{ id: 'unit', state: 'passed' }],
+  }), execOf(a))
+  assert.equal(done.pass, true, done.markdown)
+  const before = await linesOf(svc, a)
+  assert.ok(before.includes(`- ${app} (mine, reviewed)`), 'precondition: the code file is reviewed')
+  assert.ok(before.includes(`- ${notes} (mine, reviewed)`), 'precondition: the documentation file is reviewed')
+
+  fs.writeFileSync(app, 'const value = 2\n')
+  const lines = await linesOf(svc, a)
+  assert.ok(lines.includes(`- ${app} (unclaimed, unreviewed)`), `the reopened code file is unclaimed and unreviewed:\n${lines.join('\n')}`)
+  assert.ok(lines.includes(`- ${notes} (unclaimed, unreviewed)`), 'the reopened documentation file is unreviewed too')
+})
+
 test('attest is complete only when every obligation is met, and a rejected file adds no problem', async t => {
   const { session, svc, a } = await attestFixture(t, ['app.js', 'NOTES.md'])
   const rejected = await svc.__tool.execute(attestArgs(session, {

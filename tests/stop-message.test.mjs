@@ -237,6 +237,38 @@ test('an assumed item shows its reason and is labelled a promise, not a run', as
   assert.match(text, /promise, not a pass/, 'an assumed item must be labelled as a promise')
 })
 
+// Ticket personal#tz9r: the message keeps the review obligations in front of the model. A claimed code file the latest
+// attestation did not review, and a changed document no true documentation check covered, are listed by path, and the one
+// next step says to review, check the documents, then honestly attest.
+test('the message lists a claimed code file that is not reviewed and the missing documentation check', async () => {
+  const repo = changedRepo('review-nag')
+  fs.writeFileSync(path.join(repo, 'NOTES.md'), 'notes\n')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent)
+  announce(svc, agent, { cwd: repo, files: ['app.js', 'NOTES.md'] })
+  const result = await svc.attest(agent, {
+    repository_root: repo,
+    claims: [{ path: 'app.js', decision: 'mine' }, { path: 'NOTES.md', decision: 'mine' }],
+  })
+  assert.equal(result.pass, false, 'precondition: the unreviewed code file and the unchecked document keep the repository open')
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 1)
+  const text = steerText(agent.steers[0])
+  const lines = text.split('\n')
+  const codeAt = lines.indexOf('Changed code not reviewed yet:')
+  assert.ok(codeAt >= 0, `the message must list the code files not reviewed: ${text}`)
+  assert.equal(lines[codeAt + 1], `- ${path.join(repo, 'app.js')}`, 'the unreviewed claimed code file must be listed under its heading')
+  const docsAt = lines.indexOf('Changed documentation not checked yet:')
+  assert.ok(docsAt >= 0, `the message must list the missing documentation check: ${text}`)
+  assert.equal(lines[docsAt + 1], `- ${path.join(repo, 'NOTES.md')}`, 'the unchecked document must be listed under its heading')
+  const next = lines.find(line => line.startsWith('Next:'))
+  assert.ok(next, 'the message must carry a next step')
+  assert.match(next, /review each changed code file you claim/, 'the next step must say to review the claimed code files')
+  assert.match(next, /check each changed document you did not reject/, 'the next step must say to check the unrejected documents')
+  assert.match(next, /honestly attest/, 'the next step must say to attest honestly')
+})
+
 test('an item marked unrelated to the session is omitted from the message', async () => {
   const repo = changedRepo('unrelated-omitted')
   writeCatalog(repo, ['unit', 'browser'])

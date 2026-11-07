@@ -306,3 +306,49 @@ test('a copy staged while a filing is in flight files that turn itself', async t
   assert.equal(await staged.merge('s1', args), true, 'the copy must file the turn, not count the in-flight filing as done')
   assert.equal(staged.repositories('s1')[0].files.length, 1)
 })
+
+// The nested repository already holds the file with a claim of its own. The claim the outer repository carries must not
+// replace it: only an unclaimed destination takes the claim (tracker.js reroot).
+test('a file the nested repository already holds keeps the claim it holds there', async t => {
+  const outer = tempRepo(t)
+  const nested = path.join(outer, 'pkg')
+  fs.mkdirSync(nested)
+  const file = path.join(nested, 'source.js')
+  fs.writeFileSync(file, 'export const value = 1\n')
+  const repos = new RepositoryTracker()
+  await repos.merge('s1', { turn: 1, seq: 10, base: outer, files: ['pkg/source.js'], fallback: outer })
+  repos.session('s1').repos.get(outer).files.get(file).claim = 'not-mine'
+  git(nested, ['init', '-q', '.'])
+  await repos.merge('s1', { turn: 2, seq: 11, base: outer, files: ['pkg/source.js'], fallback: outer })
+  repos.session('s1').repos.get(nested).files.get(file).claim = 'mine'
+  await repos.reroot('s1', outer)
+  assert.deepEqual(repos.repositories('s1').flatMap(repo => repo.files.map(entry => [repo.root, entry.absolute, entry.claim])), [[nested, file, 'mine']])
+})
+
+// The source repository keeps its item state after its last file moves out, so the state is not dropped (tracker.js reroot).
+test('an emptied source repository that holds an item state is kept', async t => {
+  const outer = tempRepo(t)
+  const nested = path.join(outer, 'pkg')
+  fs.mkdirSync(nested)
+  fs.writeFileSync(path.join(nested, 'source.js'), 'export const value = 1\n')
+  const repos = new RepositoryTracker()
+  await repos.merge('s1', { turn: 1, seq: 10, base: outer, files: ['pkg/source.js'], fallback: outer })
+  repos.session('s1').repos.get(outer).items.set('unit', { state: 'passed' })
+  git(nested, ['init', '-q', '.'])
+  await repos.reroot('s1', outer)
+  assert.deepEqual(repos.repositories('s1').map(repo => [repo.root, repo.files.length, repo.itemStates.length]), [[outer, 0, 1], [nested, 1, 0]])
+})
+
+// The source repository keeps its attestation after its last file moves out, so the attestation is not dropped (tracker.js reroot).
+test('an emptied source repository that holds an attestation is kept', async t => {
+  const outer = tempRepo(t)
+  const nested = path.join(outer, 'pkg')
+  fs.mkdirSync(nested)
+  fs.writeFileSync(path.join(nested, 'source.js'), 'export const value = 1\n')
+  const repos = new RepositoryTracker()
+  await repos.merge('s1', { turn: 1, seq: 10, base: outer, files: ['pkg/source.js'], fallback: outer })
+  repos.applyAttest('s1', outer, { claims: [], items: [], reviewed: [], docsChecked: false }, 'now')
+  git(nested, ['init', '-q', '.'])
+  await repos.reroot('s1', outer)
+  assert.deepEqual(repos.repositories('s1').map(repo => [repo.root, repo.files.length, Boolean(repo.attestation)]), [[outer, 0, true], [nested, 1, false]])
+})

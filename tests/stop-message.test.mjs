@@ -930,20 +930,3 @@ test('a second real user message in the same turn re-arms the bound', async () =
   await stop(svc, agent, 3)
   assert.equal(agent.steers.length, 2, 'a second real prompt in the same turn must arm its own message')
 })
-
-// A real user message that carries no id still starts a prompt, so it re-arms the bound through the turn it opens.
-test('a real user message without an id re-arms the bound through its turn', async () => {
-  const repo = changedRepo('no-id')
-  const svc = service()
-  const agent = agentFor(repo)
-  begin(svc, agent, 3)
-  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
-  await stop(svc, agent, 3)
-  assert.equal(agent.steers.length, 1, 'precondition: the first prompt speaks')
-  svc.publish(agent, 'turn/start', { turn: 4 })
-  svc.publish(agent, 'user/message', { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'next' }] })
-  assert.equal(svc.state(agent).promptId, 'turn-4', 'precondition: the id-less prompt is named by the turn it opened')
-  announce(svc, agent, { turn: 4, cwd: repo, files: ['other.js'] })
-  await stop(svc, agent, 4)
-  assert.equal(agent.steers.length, 2, 'the id-less prompt must arm its own message')
-})

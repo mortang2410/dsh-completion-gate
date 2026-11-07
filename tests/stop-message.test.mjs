@@ -519,3 +519,46 @@ test('an attested nested repository whose HEAD becomes unreadable on a later sto
   assert.ok(text.includes(child), 'the notice must name the nested repository by its path')
   assertAdvisory(text)
 })
+
+// A file the host cannot compare as text serves no lines, so the scan never reads its added lines. The gate saw that gap,
+// so the gap line must name it, with a complete repository, exactly as a thrown read does.
+for (const kind of ['binary', 'oversized']) {
+  test(`a changed file whose added lines come back ${kind} is named as unread, even when no credential hit exists`, async () => {
+    const repo = changedRepo(`gap-${kind}`)
+    writeCatalog(repo, ['unit'])
+    const changes = recorder()
+    changes.diff = async () => ({ kind, path: 'app.js', display: 'app.js' })
+    const svc = service({ workspaceChanges: changes })
+    const agent = agentFor(repo)
+    begin(svc, agent)
+    announce(svc, agent, { cwd: repo, files: ['app.js'] })
+    const result = await svc.attest(agent, {
+      repository_root: repo,
+      claims: [{ path: 'app.js', decision: 'mine' }],
+      reviewed_code_files: ['app.js'],
+      items: [{ id: 'unit', state: 'passed' }],
+    })
+    assert.equal(result.pass, true, `precondition: the repository must be complete: ${result.problems.join(' | ')}`)
+    await stop(svc, agent)
+    assert.equal(agent.steers.length, 1, `the ${kind} file must send a message even when the repository is complete`)
+    const text = steerText(agent.steers[0])
+    assert.match(text, /1 changed file could not be read for this scan/, 'the gap line must name the unread file')
+    assertAdvisory(text)
+  })
+}
+
+test('a turn whose changed files cannot be attributed to a repository is named at the stop, and no check runs', async () => {
+  const repo = changedRepo('attribution-failure')
+  writeCatalog(repo, ['unit'])
+  const svc = service()
+  svc.repositories.merge = async () => { throw new Error('simulated EIO') }
+  const agent = agentFor(repo)
+  begin(svc, agent)
+  announce(svc, agent, { cwd: repo, files: ['app.js'] })
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 1, 'a failed attribution must send a message, because the gate saw the failure')
+  const text = steerText(agent.steers[0])
+  assert.match(text, /could not attribute the changed files of turn 3 to their repositories: simulated EIO/, 'the message must name the turn and the failure')
+  assert.match(text, /no project verification check ran/i, 'the message must say no check ran')
+  assertAdvisory(text)
+})

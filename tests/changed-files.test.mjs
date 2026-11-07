@@ -246,7 +246,7 @@ test('an added line that begins with two plus signs is still an added line', asy
   // The host's hunk lines keep their own prefix: '+' marks an added line, so this line is an
   // added line whose text begins with '++'.
   const service = { async diff() { return { kind: 'text', hunks: [{ lines: [' let counter = 0', '+++eval(counter)', '+let ok = 1'] }] } } }
-  const collected = await addedLinesForRecord(service, 'session-1', 5, 1, new AbortController().signal)
+  const collected = await addedLinesForRecord(service, 'session-1', 5, ['app.js'], new AbortController().signal)
   assert.deepEqual(collected.lines, ['++eval(counter)', 'let ok = 1'])
   assert.deepEqual(scanSecurity(collected.lines).map(hit => hit.id), ['eval'], 'the eval on the added line must be reported')
 })

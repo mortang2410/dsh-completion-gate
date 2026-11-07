@@ -34,6 +34,15 @@ test('turn-stopping schedules a fresh follow-up for screenshot-style unfinished 
  assert.match(a.followups[0].content[0].text,/PREMATURE STOP RECOVERY/);
 })
 
+test('the master switch disables premature-stop recovery',async()=>{
+ const svc=liveService({enabled:false});const a=agent();
+ emit(svc,a,'turn/start',{turn:21});
+ emit(svc,a,'assistant/message',{turn:21,message:{content:[{type:'text',text:'Next I will inspect the call site.'}]}});
+ await svc.stopping({agent:a,turn:21,signal:new AbortController().signal});
+ assert.equal(a.followups.length,0,'a disabled gate must not schedule a recovery turn');
+ assert.equal(a.steers.length,0,'a disabled gate must not steer');
+})
+
 test('turn-stopping leaves subagent lifecycle untouched by default',async()=>{
  const a=agent([{type:'assistant/message',data:{turn:1,message:{content:[{type:'text',text:'Now I need to inspect next.'}]}}}],{cwd:process.cwd(),parentSession:'root',delegationDepth:1})
  const s=service(ctx,{})

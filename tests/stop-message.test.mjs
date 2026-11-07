@@ -805,6 +805,41 @@ test('a credential hit recorded after the prompt message waits for the next real
   assert.doesNotMatch(text, /hunter2/, 'the matched value must never be written into the message')
 })
 
+// A hit the bound suppressed is kept, not lost: the change record is turn-scoped, so the next prompt's own diff cannot
+// show it again. The hit rides the next prompt's one message even when that prompt changes nothing that trips the scan.
+test('a credential hit suppressed by the bound is carried into the next prompt even when its own diff is clean', async () => {
+  const repo = changedRepo('credential-carried')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent, 3)
+  prompt(svc, agent, 3)
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'], diffs: [[]] })
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 1, 'precondition: the first stop sends the prompt advisory')
+  assert.doesNotMatch(steerText(agent.steers[0]), /Possible hard-coded credential/, 'precondition: the first message has no hit to name')
+  // The same prompt stops again, and now the read succeeds and exposes the credential. The bound suppresses the message.
+  announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'], diffs: [['+password = "hunter2hunter2"']] })
+  await stop(svc, agent, 3)
+  assert.equal(agent.steers.length, 1, 'the second stop of one prompt must stay silent')
+  // The next prompt changes nothing that trips the scan, so only a retained hit can name the credential.
+  begin(svc, agent, 4)
+  prompt(svc, agent, 4)
+  announce(svc, agent, { turn: 4, cwd: repo, files: ['other.js'], diffs: [[]] })
+  await stop(svc, agent, 4)
+  assert.equal(agent.steers.length, 2, 'the next prompt must speak once')
+  const text = steerText(agent.steers[1])
+  assert.match(text, /Possible hard-coded credential or secret/, 'the carried hit must be named even when the new diff is clean')
+  assert.doesNotMatch(text, /hunter2/, 'the matched value must never be written into the message')
+  // The carried hit is spent: a later prompt must not repeat a credential the session already saw.
+  begin(svc, agent, 5)
+  prompt(svc, agent, 5)
+  announce(svc, agent, { turn: 5, cwd: repo, files: ['other.js'], diffs: [[]] })
+  await stop(svc, agent, 5)
+  const later = agent.steers.at(-1)
+  assert.equal(agent.steers.length, 3, 'precondition: the later prompt speaks about its own unfinished work')
+  assert.doesNotMatch(steerText(later), /Possible hard-coded credential/, 'a carried hit must not be repeated once it has been named')
+})
+
 test('verificationNudgeLimit is not consulted', async () => {
   const repo = changedRepo('nudge-dead')
   const svc = service({ settings: { verificationNudgeLimit: 0 } })

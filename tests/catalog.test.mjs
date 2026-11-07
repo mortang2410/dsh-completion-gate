@@ -170,6 +170,25 @@ test('a root with no git gets the catalog and reports no exclusion, without an e
   assert.match(result.registered.exclusion.reason, /not a git repository/)
 })
 
+test('a folder with an empty .git entry inside another repository registers there, and the outer repository ignores the catalog', async t => {
+  const outer = gitRepo('outer-')
+  const nested = path.join(outer, 'nested')
+  fs.mkdirSync(path.join(nested, '.git'), { recursive: true })
+  fs.writeFileSync(path.join(nested, 'app.js'), 'const value = 1\n')
+  const summaries = new Map()
+  const svc = gateFor(t, summaries)
+  const a = agentIn(outer)
+  announceTurn(svc, a, summaries, 1, outer, ['nested/app.js'])
+  const result = await register(svc, a, nested, [{ name: 'Nested smoke', proves: 'The nested app starts.' }])
+  assert.equal(readCatalog(nested).items[0].id, 'nested-smoke')
+  assert.equal(result.registered.exclusion.applied, true, 'the exclusion is applied through the repository git resolves')
+  assert.equal(result.registered.exclusion.added, true)
+  assert.equal(fs.realpathSync(result.registered.exclusion.file), fs.realpathSync(path.join(outer, '.git', 'info', 'exclude')), 'the line goes into the outer repository exclude file')
+  assert.equal(excludeLines(outer).includes('.dsh/'), true, 'the outer repository excludes the catalog')
+  const ignored = spawnSync('git', ['check-ignore', '-q', 'nested/.dsh/verification.json'], { cwd: outer })
+  assert.equal(ignored.status, 0, 'git ignores the nested catalog through the outer repository local exclude')
+})
+
 test('register refuses a repository root the session has not seen, and writes nothing there', async t => {
   const session = gitRepo('session-')
   const stranger = gitRepo('stranger-')

@@ -208,6 +208,23 @@ test('register writes into a symlinked sibling repository, never into the worksp
   assert.equal(excludeLines(session).includes('.dsh/'), false, 'the workspace exclude file is unchanged')
 })
 
+test('register writes into a sibling subdirectory that a symlink points at, never into the workspace that links to it', async t => {
+  const session = gitRepo('session-')
+  const sibling = gitRepo('sibling-')
+  fs.mkdirSync(path.join(sibling, 'sub'))
+  fs.writeFileSync(path.join(sibling, 'sub', 'app.js'), 'const value = 1\n')
+  fs.symlinkSync(path.join(sibling, 'sub'), path.join(session, 'vendor'))
+  const summaries = new Map()
+  const svc = gateFor(t, summaries)
+  const a = agentIn(session)
+  announceTurn(svc, a, summaries, 1, session, ['vendor/app.js'])
+  await register(svc, a, 'vendor', [{ name: 'Sibling smoke', proves: 'The sibling starts.' }])
+  assert.equal(fs.existsSync(path.join(session, '.dsh')), false, 'the workspace gets no catalog')
+  assert.equal(readCatalog(sibling).items[0].id, 'sibling-smoke')
+  assert.equal(excludeLines(sibling).includes('.dsh/'), true, 'the sibling excludes its own catalog')
+  assert.equal(excludeLines(session).includes('.dsh/'), false, 'the workspace exclude file is unchanged')
+})
+
 test('register keeps the item text as entered, and the register and status reports still show each item on one line', async t => {
   const repo = gitRepo()
   const svc = gateFor(t)

@@ -127,6 +127,28 @@ test('a symlink that loops on itself is not a directory, so its walk starts at i
   assert.equal(await owningRoot(loop, tempDir(t)), repo)
 })
 
+test('a symlink into a subdirectory of a sibling repository resolves to that sibling, not the repository holding the link', async t => {
+  const session = tempRepo(t)
+  const sibling = tempRepo(t)
+  fs.mkdirSync(path.join(sibling, 'sub'))
+  fs.writeFileSync(path.join(sibling, 'sub', 'x.js'), 'export {}\n')
+  fs.symlinkSync(path.join(sibling, 'sub'), path.join(session, 'vendor'))
+  assert.equal(await owningRoot(path.join(session, 'vendor', 'x.js'), session), sibling)
+})
+
+test('a symlink to a file in a sibling repository resolves to the repository that holds the file', async t => {
+  const session = tempRepo(t)
+  const sibling = tempRepo(t)
+  fs.symlinkSync(path.join(sibling, 'app.js'), path.join(session, 'linked.js'))
+  assert.equal(await owningRoot(path.join(session, 'linked.js'), session), sibling)
+})
+
+test('a path whose directory is gone still resolves to the repository that held it', async t => {
+  const repo = tempRepo(t)
+  const elsewhere = tempDir(t)
+  assert.equal(await owningRoot(path.join(repo, 'gone', 'x.js'), elsewhere), repo)
+})
+
 test('the owning repository follows the durable path, never the display string', async t => {
   const session = tempRepo(t)
   const sibling = tempRepo(t)

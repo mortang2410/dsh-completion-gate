@@ -270,6 +270,50 @@ test('a changed nested repository is read by status without starting a check', a
   assert.ok(result.markdown.includes(`Root: ${nested}`), result.markdown)
 })
 
+// A file filed under the outer repository moves to a nested repository that appears after the file was filed, and keeps the
+// claim this session made on it. The trigger is a nested .git created during the session. Status does not re-file a turn, so
+// only the owner pass on every report can move the file.
+test('a file filed under an outer repository moves to a nested repository created later, keeping its claim', async t => {
+  const session = tempGitRepo(t)
+  const nested = path.join(session, 'pkg')
+  fs.mkdirSync(nested)
+  const file = path.join(nested, 'source.js')
+  fs.writeFileSync(file, 'export const value = 1\n')
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['pkg/source.js'])
+  await svc.__tool.execute({ action: 'status' }, execOf(a))
+  svc.repositories.session(a.id).repos.get(session).files.get(file).claim = 'mine'
+  execFileSync('git', ['init', '-q', '.'], { cwd: nested })
+  await svc.__tool.execute({ action: 'status' }, execOf(a))
+  const owners = svc.repositories.repositories(a.id).flatMap(repo => repo.files.map(entry => ({ root: repo.root, absolute: entry.absolute, claim: entry.claim })))
+  assert.deepEqual(owners, [{ root: nested, absolute: file, claim: 'mine' }])
+})
+
+// The same move through a staged call. Attest and register run their report on a staged copy whose merged-turn map starts
+// empty, so the old turn is filed again inside the copy while the outer copy still holds the file. The adopted state must
+// hold the file under the nested root only, with the claim the outer copy held.
+test('a staged call after a nested repository appears leaves a file under the nested root only', async t => {
+  const session = tempGitRepo(t)
+  const nested = path.join(session, 'pkg')
+  fs.mkdirSync(nested)
+  const file = path.join(nested, 'source.js')
+  fs.writeFileSync(file, 'export const value = 1\n')
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['pkg/source.js'])
+  await svc.__tool.execute({ action: 'status' }, execOf(a))
+  svc.repositories.session(a.id).repos.get(session).files.get(file).claim = 'mine'
+  execFileSync('git', ['init', '-q', '.'], { cwd: nested })
+  await svc.__tool.execute({ action: 'register', repository_root: nested, items: [{ name: 'Unit', proves: 'source.js sets value' }] }, execOf(a))
+  const owners = svc.repositories.repositories(a.id).flatMap(repo => repo.files.map(entry => ({ root: repo.root, absolute: entry.absolute, claim: entry.claim })))
+  assert.deepEqual(owners, [{ root: nested, absolute: file, claim: 'mine' }])
+})
+
 test('a session outside any git repository gets a notice that its change record covers file-tool edits only', async t => {
   const plain = tempPlainDir(t)
   const summaries = new Map()

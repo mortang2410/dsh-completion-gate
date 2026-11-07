@@ -167,7 +167,7 @@ test('revert: the pre-loop pending-work patterns still block',()=>{const blockin
 // Repositories section of the status action. A stub host carries a change recorder and captures the tool the gate
 // registers, so a test can call its execute. Status must never start a check, so each test spies on the run seam.
 // Test workspaces live under the task's Trash root, never the system temporary directory (AGENTS.md).
-const workRoot=path.join(os.homedir(),'Trash','kv4x-tests')
+const workRoot=path.join(os.homedir(),'Trash','3t34-tests')
 function makeWorkDir(prefix){fs.mkdirSync(workRoot,{recursive:true});return fs.realpathSync(fs.mkdtempSync(path.join(workRoot,prefix)))}
 function tempPlainDir(t){const dir=makeWorkDir('plain-');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));return dir}
 function tempGitRepo(t){const dir=makeWorkDir('status-');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));execFileSync('git',['init','-q','.'],{cwd:dir});fs.writeFileSync(path.join(dir,'app.js'),'const value = 1\n');return dir}
@@ -440,4 +440,158 @@ test('status says a repository has no catalog yet, and names an unreadable catal
   assert.match(result.markdown, /No catalog exists yet/)
   assert.match(result.markdown, /Catalog unreadable, so its items are not listed: the file is not valid JSON/)
   assert.doesNotMatch(result.markdown, /Catalog readable, with no items yet/, 'an unreadable catalog is never shown as readable and empty')
+})
+
+// The attest action, driven through the tool the gate registers, so the schema, the root rule, the problem list (the tool's
+// blockers), and the status report are the ones a model sees. The fixture registers one catalog item, 'unit'. Its run seam
+// throws, so an attest that starts a check fails the test. No tool event is emitted: a claim is believed as reported.
+// These fixtures are never deleted by a test: attestRepo makes no t.after removal, as AGENTS.md requires.
+function attestRepo() {
+  const dir = makeWorkDir('attest-')
+  execFileSync('git', ['init', '-q', '.'], { cwd: dir })
+  fs.writeFileSync(path.join(dir, 'app.js'), 'const value = 1\n')
+  return dir
+}
+const execOf = a => ({ agent: a, signal: new AbortController().signal })
+const attestArgs = (session, extra) => ({ action: 'attest', repository_root: session, ...extra })
+const completeAttest = session => attestArgs(session, { claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'], items: [{ id: 'unit', state: 'passed' }] })
+const linesOf = async (svc, a) => (await svc.__tool.execute({ action: 'status' }, execOf(a))).markdown.split('\n')
+async function attestFixture(t, files = ['app.js']) {
+  const session = attestRepo()
+  for (const file of files) if (!fs.existsSync(path.join(session, file))) fs.writeFileSync(path.join(session, file), 'x\n')
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  t.mock.method(svc, 'run', async () => { throw new Error('attest and status must not call run') })
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, files)
+  await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Unit', proves: 'app.js sets value' }] }, execOf(a))
+  return { session, svc, a, summaries }
+}
+
+test('attest stores mine and not-mine claims and item states, and status shows them', async t => {
+  const { session, svc, a } = await attestFixture(t, ['app.js', 'other.js'])
+  const result = await svc.__tool.execute(attestArgs(session, {
+    claims: [{ path: 'app.js', decision: 'mine' }, { path: 'other.js', decision: 'not-mine' }],
+    reviewed_code_files: ['app.js'], items: [{ id: 'unit', state: 'passed' }], summary: 'Reviewed app.js.',
+  }), execOf(a))
+  assert.equal(result.pass, true, result.markdown)
+  assert.deepEqual(result.blockers, [])
+  const lines = await linesOf(svc, a)
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine)`), 'the mine claim is stored')
+  assert.ok(lines.includes(`- ${path.join(session, 'other.js')} (not-mine)`), 'the not-mine claim is stored')
+  assert.ok(lines.includes('- unit: Unit | passed'), 'the passed item state is stored')
+  assert.ok(lines.includes('Attestation: current'))
+  assert.ok(lines.includes('Status: complete'))
+})
+
+test('attest refuses an unknown path, an unknown item, an unseen root, and a retired key, and changes nothing', async t => {
+  const { session, svc, a } = await attestFixture(t)
+  const unseen = attestRepo()
+  const before = JSON.stringify(await svc.repositoryReport(a))
+  const refusals = [
+    [attestArgs(session, { claims: [{ path: 'missing.js', decision: 'mine' }] }), /missing\.js is not a changed file of this repository/],
+    [attestArgs(session, { items: [{ id: 'nope', state: 'passed' }] }), /nope is not an item in this repository's catalog/],
+    [attestArgs(unseen, { claims: [] }), /is not a repository this session has changed/],
+    [attestArgs(session, { acceptance_criteria: [{ criterion: 'x', evidence: 'y' }] }), /Unknown argument: acceptance_criteria\./],
+  ]
+  for (const [args, expected] of refusals) {
+    await assert.rejects(svc.__tool.execute(args, execOf(a)), error => {
+      assert.match(error.message, expected)
+      assert.match(error.message, /Nothing was changed\./)
+      return true
+    })
+  }
+  assert.equal(JSON.stringify(await svc.repositoryReport(a)), before, 'a refused attest changes no claim, item state, or attestation')
+})
+
+test('a valid but incomplete attest is stored and returns its problems', async t => {
+  const { session, svc, a } = await attestFixture(t, ['app.js', 'other.js'])
+  const result = await svc.__tool.execute(attestArgs(session, { claims: [{ path: 'app.js', decision: 'mine' }] }), execOf(a))
+  assert.equal(result.pass, false, result.markdown)
+  assert.ok(result.blockers.some(p => p.startsWith('Unclaimed changed files:') && p.includes(path.join(session, 'other.js'))), result.markdown)
+  assert.ok(result.blockers.some(p => p.startsWith('Claimed code files not reviewed:') && p.includes(path.join(session, 'app.js'))), result.markdown)
+  assert.ok(result.blockers.includes('Catalog item not stated: unit (Unit).'), result.markdown)
+  const lines = await linesOf(svc, a)
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine)`), 'the incomplete attest stored its claim')
+  assert.ok(lines.includes('Attestation: current'), 'the incomplete attest is stored')
+  assert.ok(lines.includes('Status: unfinished'))
+})
+
+test('a claimed code file missing from the reviewed list is a problem, and the attestation still stores', async t => {
+  const { session, svc, a } = await attestFixture(t)
+  const unreviewed = await svc.__tool.execute(attestArgs(session, { claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: [], items: [{ id: 'unit', state: 'passed' }] }), execOf(a))
+  assert.deepEqual(unreviewed.blockers, [`Claimed code files not reviewed: ${path.join(session, 'app.js')}.`])
+  assert.ok((await linesOf(svc, a)).includes('Attestation: current'), 'the attestation with the problem is stored')
+  const reviewed = await svc.__tool.execute(completeAttest(session), execOf(a))
+  assert.deepEqual(reviewed.blockers, [], 'reviewing the file clears the problem')
+})
+
+test('a changed documentation file is a problem until docs_checked is true', async t => {
+  const { session, svc, a } = await attestFixture(t, ['app.js', 'README.md'])
+  const readme = path.join(session, 'README.md')
+  const claims = { claims: [{ path: 'app.js', decision: 'mine' }, { path: 'README.md', decision: 'mine' }], reviewed_code_files: ['app.js'], items: [{ id: 'unit', state: 'passed' }] }
+  const unchecked = await svc.__tool.execute(attestArgs(session, { ...claims, docs_checked: false }), execOf(a))
+  assert.ok(unchecked.blockers.some(p => p.startsWith('Changed documentation not checked:') && p.includes(readme)), unchecked.markdown)
+  const checked = await svc.__tool.execute(attestArgs(session, { ...claims, docs_checked: true }), execOf(a))
+  assert.deepEqual(checked.blockers, [], checked.markdown)
+  assert.equal(checked.pass, true)
+})
+
+test('an assumed item without a reason is refused, and an assumed item with a reason is kept and shown', async t => {
+  const { session, svc, a } = await attestFixture(t)
+  const claim = { claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'] }
+  await assert.rejects(svc.__tool.execute(attestArgs(session, { ...claim, items: [{ id: 'unit', state: 'assumed' }] }), execOf(a)), /items\[0\] is assumed, so it needs a reason\./)
+  const attested = await svc.__tool.execute(attestArgs(session, { ...claim, items: [{ id: 'unit', state: 'assumed', reason: 'The suite needs a database this session does not have.' }] }), execOf(a))
+  assert.equal(attested.pass, true, attested.markdown)
+  assert.ok((await linesOf(svc, a)).includes('- unit: Unit | assumed, not run: The suite needs a database this session does not have.'), 'the reason is shown')
+})
+
+test('a rejected file leaves the problems list, and an unclaimed file keeps the gate speaking', async t => {
+  const { session, svc, a } = await attestFixture(t, ['app.js', 'other.js'])
+  const first = await svc.__tool.execute(completeAttest(session), execOf(a))
+  assert.ok(first.blockers.some(p => p.startsWith('Unclaimed changed files:') && p.includes(path.join(session, 'other.js'))), first.markdown)
+  const second = await svc.__tool.execute(attestArgs(session, { claims: [{ path: 'app.js', decision: 'mine' }, { path: 'other.js', decision: 'not-mine' }], reviewed_code_files: ['app.js'], items: [{ id: 'unit', state: 'passed' }] }), execOf(a))
+  assert.deepEqual(second.blockers, [], second.markdown)
+})
+
+test('changing a recorded file after attestation reopens the repository: claims reset, items cleared, attestation dropped', async t => {
+  const { session, svc, a } = await attestFixture(t)
+  const attested = await svc.__tool.execute(completeAttest(session), execOf(a))
+  assert.equal(attested.pass, true, attested.markdown)
+  fs.writeFileSync(path.join(session, 'app.js'), 'const value = 2\n')
+  const lines = await linesOf(svc, a)
+  assert.ok(lines.some(line => line.startsWith('Notice: Repository ') && line.includes(`${session} changed after its attestation`)), 'the reopen is named')
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed)`), 'the claim is reset')
+  assert.ok(lines.includes('- unit: Unit | not stated'), 'the item state is cleared')
+  assert.ok(lines.includes('Attestation: missing'), 'the attestation is dropped')
+})
+
+test('a new recorded path after attestation reopens the repository', async t => {
+  const { session, svc, a, summaries } = await attestFixture(t)
+  const attested = await svc.__tool.execute(completeAttest(session), execOf(a))
+  assert.equal(attested.pass, true, attested.markdown)
+  fs.writeFileSync(path.join(session, 'new.js'), 'const added = 1\n')
+  announceTurn(svc, a, summaries, 2, session, ['new.js'])
+  const lines = await linesOf(svc, a)
+  assert.ok(lines.some(line => line.startsWith('Notice: Repository ') && line.includes(`${session} changed after its attestation`)), 'the new path reopens the repository')
+  assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed)`), 'the earlier claim is reset')
+  assert.ok(lines.includes(`- ${path.join(session, 'new.js')} (unclaimed)`), 'the new path is listed unclaimed')
+  assert.ok(lines.includes('Attestation: missing'))
+})
+
+test('attest starts no check: a package test script that writes a marker leaves no marker behind', async t => {
+  const { session, svc, a } = await attestFixture(t)
+  fs.writeFileSync(path.join(session, 'package.json'), JSON.stringify({ name: 'app', version: '1.0.0', scripts: { test: "node -e \"require('fs').writeFileSync('marker', '')\"" } }))
+  const result = await svc.__tool.execute(completeAttest(session), execOf(a))
+  assert.equal(result.pass, true, result.markdown)
+  assert.equal(fs.existsSync(path.join(session, 'marker')), false, 'no check ran, so the test script did not write its marker')
+})
+
+test('the completion_gate tool takes claims, reviewed_code_files, docs_checked, and summary, and no retired argument', t => {
+  const svc = statusService(new Map())
+  t.after(() => cleanupService(svc))
+  const properties = svc.__tool.parameters.properties
+  for (const key of ['claims', 'reviewed_code_files', 'docs_checked', 'summary', 'items', 'repository_root']) assert.ok(properties[key], `the schema takes ${key}`)
+  for (const key of ['acceptance_criteria', 'unresolved_issues', 'reviewed_files', 'review_summary']) assert.equal(properties[key], undefined, `the schema no longer takes ${key}`)
 })

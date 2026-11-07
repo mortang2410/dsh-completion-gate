@@ -17,9 +17,13 @@ function git(cwd, args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
 }
 
-function tempRepo(t) {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cg-gate-')))
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+// Test workspaces live under the task's Trash root, never the system temporary directory (AGENTS.md). The tests never
+// delete their repositories, so each run leaves them in that Trash root for the user to clear.
+const workRoot = path.join(os.homedir(), 'Trash', '3t34-tests')
+
+function tempRepo() {
+  fs.mkdirSync(workRoot, { recursive: true })
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(workRoot, 'cg-gate-')))
   git(dir, ['init', '-q', '.'])
   git(dir, ['config', 'user.email', 'test@example.com'])
   git(dir, ['config', 'user.name', 'test'])
@@ -42,7 +46,8 @@ function recorder(entries = new Map()) {
 }
 
 function service({ workspaceChanges = recorder(), settings = {} } = {}) {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cg-gate-settings-')))
+  fs.mkdirSync(workRoot, { recursive: true })
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(workRoot, 'cg-gate-settings-')))
   // The gate starts against a stub host, so tests can publish turn events through its session/event hook.
   const listeners = new Map()
   const off = () => () => {}
@@ -76,6 +81,13 @@ function announce(svc, sessionId, turn, seq, files) {
 }
 
 const file = (p) => ({ path: p, display: p, added: 1, deleted: 0 })
+
+// A catalog with one item, 'unit', so an attestation can state it. The legacy stop path needs one item state to pass.
+function writeUnitCatalog(repo) {
+  fs.mkdirSync(path.join(repo, '.dsh'), { recursive: true })
+  const stamp = '2026-11-07T00:00:00.000Z'
+  fs.writeFileSync(path.join(repo, '.dsh', 'verification.json'), `${JSON.stringify({ version: 1, items: [{ id: 'unit', name: 'Unit', proves: 'app.js sets value', addedAt: stamp, updatedAt: stamp }] }, null, 2)}\n`)
+}
 
 test('a repository with pre-existing dirt does not look changed to the gate', async t => {
   const repo = tempRepo(t)
@@ -294,9 +306,10 @@ test('a turn keeps its attestation across repeated stops while its files and con
       svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 3 } })
       svc.changeService().entries.set(`session-1:${seq}`, { turn: 3, cwd: repo, files: [file('app.js')], total: 1, added: 1, deleted: 0 })
     }
+    writeUnitCatalog(repo)
     const attestation = {
-      action: 'attest', reviewed_files: ['app.js'], review_summary: 'Reviewed app.js.',
-      acceptance_criteria: [{ criterion: 'app.js sets value', evidence: 'app.js line 1' }], unresolved_issues: [],
+      action: 'attest', repository_root: repo, claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'],
+      items: [{ id: 'unit', state: 'passed' }], summary: 'Reviewed app.js.',
     }
 
     publish(305)
@@ -343,10 +356,12 @@ test('a moved nested repository pointer changes the attestation identity and an 
       svc.changeService().entries.set(`session-1:${seq}`, { turn: 5, cwd: repo, files: [file('nested')], total: 1, added: 1, deleted: 0 })
     }
 
+    // The nested repository is its own repository root, so the pointer is attested under the child root as the path '.'.
     publish(60)
+    writeUnitCatalog(child)
     const attested = await svc.attest(agent, {
-      action: 'attest', reviewed_files: ['nested'], review_summary: 'Reviewed the nested repository pointer.',
-      acceptance_criteria: [{ criterion: 'nested is at its reviewed commit', evidence: 'child HEAD at attestation' }], unresolved_issues: [],
+      action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'],
+      items: [{ id: 'unit', state: 'passed' }], summary: 'Reviewed the nested repository pointer.',
     })
     assert.equal(attested.pass, true, `attest failed: ${JSON.stringify(attested.blockers)}`)
 
@@ -439,12 +454,10 @@ test('a turn that changed nothing reports its stop result once the turn has ende
     assert.deepEqual(forced.changedFiles, [])
     assert.equal(forced.pass, true, `unexpected blockers: ${JSON.stringify(forced.blockers)}`)
 
-    const attested = await svc.attest(agent, {
-      action: 'attest', reviewed_files: [], review_summary: 'No file changed.',
-      acceptance_criteria: [{ criterion: 'no change', evidence: 'no file changed' }], unresolved_issues: [],
-    })
-    assert.equal(attested.changesDetermined, true)
-    assert.equal(attested.pass, true, `attest after the turn ended failed: ${JSON.stringify(attested.blockers)}`)
+    // A repository with no changed file owes no claim and no item, so an attest made after the turn ended passes.
+    const attested = await svc.attest(agent, { action: 'attest', repository_root: repo })
+    assert.deepEqual(attested.problems, [], `attest after the turn ended failed: ${JSON.stringify(attested.problems)}`)
+    assert.equal(attested.pass, true)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
@@ -519,7 +532,7 @@ test('a stop does not reuse a failing machine result, so an environment-only fix
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
-test('a stop does not reuse a failing result that attest cached for the same change set', async t => {
+test('attest starts no check and caches nothing, so the next stop runs the check itself', async t => {
   const repo = readyCheckRepo(t)
   const svc = service({ settings: { requireAttestation: false } })
   svc.__repo = repo
@@ -527,13 +540,19 @@ test('a stop does not reuse a failing result that attest cached for the same cha
     const agent = agentFor(repo)
     const signal = new AbortController().signal
     publishReady(svc, 40)
-    const failed = await svc.attest(agent, { action: 'attest', reviewed_files: ['app.js'], review_summary: 'Reviewed app.js.', acceptance_criteria: [{ criterion: 'app.js sets value', evidence: 'app.js line 1' }], unresolved_issues: [] })
-    assert.equal(failed.pass, false, 'precondition: the required check fails')
+    assert.equal(fs.existsSync(path.join(repo, 'ready')), false, 'precondition: the required check fails without the ready file')
+    await svc.attest(agent, { action: 'attest', repository_root: repo })
+    assert.equal(svc.state(agent).cached.size, 0, 'attest caches no machine result')
+    assert.equal(svc.state(agent).lastReport, null, 'attest records no check report')
+
+    await svc.stopping({ agent, turn: 2, signal })
+    assert.equal(agent.steers.length, 1, 'the stop runs the check, and the failing check blocks')
+    assert.match(agent.steers[0].content[0].text, /failed\./)
 
     fs.writeFileSync(path.join(repo, 'ready'), '')
     publishReady(svc, 42)
     await svc.stopping({ agent, turn: 2, signal })
-    assert.equal(agent.steers.length, 0, `a stop must not block on a result cached by attest: ${agent.steers.at(-1)?.content[0].text}`)
+    assert.equal(agent.steers.length, 1, `the stop after the fix must pass: ${agent.steers.at(-1)?.content[0].text}`)
     assert.equal(svc.state(agent).lastReport.pass, true)
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
@@ -565,10 +584,13 @@ test('an unreadable nested HEAD blocks with the named message and passes once it
     const savedHead = fs.readFileSync(headFile, 'utf8')
     const named = /Nested repository nested: could not read nested HEAD; re-run \/gate\./
 
+    // The nested pointer is a file of its own repository (a directory with a .git entry owns itself), so the attest
+    // names the child root and the pointer is the child root itself: the path '.'.
+    writeUnitCatalog(child)
     publish(60)
     const attested = await svc.attest(agent, {
-      action: 'attest', reviewed_files: ['nested'], review_summary: 'Reviewed the nested repository pointer.',
-      acceptance_criteria: [{ criterion: 'nested is at its reviewed commit', evidence: 'child HEAD at attestation' }], unresolved_issues: [],
+      action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'],
+      items: [{ id: 'unit', state: 'passed' }], summary: 'Reviewed the nested repository pointer.',
     })
     assert.equal(attested.pass, true, `attest failed: ${JSON.stringify(attested.blockers)}`)
 
@@ -599,7 +621,7 @@ test('an unreadable nested HEAD blocks with the named message and passes once it
 })
 
 // The first HEAD read of a nested repository fails, so no earlier HEAD stands in for it. An attest made in that
-// window must bind nothing: it is refused with the named block the stop check uses, and one attest after recovery passes.
+// window must bind nothing: it throws with its own refusal message, and one attest after recovery passes.
 test('an attest during a first nested HEAD read failure binds nothing, and one attest after recovery passes', async t => {
   const repo = tempRepo(t)
   const child = path.join(repo, 'nested')
@@ -625,21 +647,17 @@ test('an attest during a first nested HEAD read failure binds nothing, and one a
       svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 5 } })
       svc.changeService().entries.set(`session-1:${seq}`, { turn: 5, cwd: repo, files: [file('nested')], total: 1, added: 1, deleted: 0 })
     }
-    const named = /Nested repository nested: could not read nested HEAD; re-run \/gate\./
     const attestation = {
-      action: 'attest', reviewed_files: ['nested'], review_summary: 'Reviewed the nested repository pointer.',
-      acceptance_criteria: [{ criterion: 'nested is at its reviewed commit', evidence: 'child HEAD at attestation' }], unresolved_issues: [],
+      action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'],
+      items: [{ id: 'unit', state: 'passed' }], summary: 'Reviewed the nested repository pointer.',
     }
 
     publish(80)
-    const refused = await svc.attest(agent, attestation)
-    assert.equal(refused.pass, false, 'an attest during the failure window must not pass')
-    assert.match(refused.blockers.join(' '), named)
-    const stopCheck = await svc.run(agent, signal)
-    assert.deepEqual(refused.blockers, stopCheck.blockers, 'the refused attest must carry the same blockers as the stop check')
+    await assert.rejects(svc.attest(agent, attestation), /Nested repository nested has no readable HEAD yet, so nothing is attested/)
     assert.equal(svc.state(agent).attestation, null, 'a refused attest must bind nothing to the placeholder identity')
 
     fs.writeFileSync(headFile, savedHead)
+    writeUnitCatalog(child)
     publish(81)
     const attested = await svc.attest(agent, attestation)
     assert.equal(attested.pass, true, `one attest after recovery must pass: ${JSON.stringify(attested.blockers)}`)
@@ -712,10 +730,12 @@ test('a moved nested pointer under a path containing a newline changes the attes
       svc.changeService().entries.set(`session-1:${seq}`, { turn: 6, cwd: repo, files: [file(listed)], total: 1, added: 1, deleted: 0 })
     }
 
+    // The listed directory owns itself, so the attest names the child root and the pointer is the path '.'.
+    writeUnitCatalog(child)
     publish(70)
     const attested = await svc.attest(agent, {
-      action: 'attest', reviewed_files: [listed], review_summary: 'Reviewed the nested repository pointer.',
-      acceptance_criteria: [{ criterion: 'nested is at its reviewed commit', evidence: 'child HEAD at attestation' }], unresolved_issues: [],
+      action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'],
+      items: [{ id: 'unit', state: 'passed' }], summary: 'Reviewed the nested repository pointer.',
     })
     assert.equal(attested.pass, true, `attest failed: ${JSON.stringify(attested.blockers)}`)
     publish(71)

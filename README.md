@@ -402,7 +402,6 @@ The bundled profile patch starts with:
         autoDetectRecipe: true
         allowTemporaryVerifier: true
         recipeReadinessTimeoutMs: 60000
-        verificationNudgeLimit: 3
         customChecks: []
 ```
 

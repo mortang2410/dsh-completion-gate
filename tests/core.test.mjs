@@ -10,9 +10,9 @@ test('hotfix defaults are safe', () => {
 })
 
 test('resolveConfig clamps the numeric keys into their ranges', () => {
-  const c = resolveConfig({ maxChangedFiles: 1, verificationNudgeLimit: 99, prematureStopMaxContinuations: -4 })
+  const c = resolveConfig({ maxChangedFiles: 1, prematureStopMaxContinuations: -4, securityScan: 'yes' })
   assert.equal(c.maxChangedFiles, 10)
-  assert.equal(c.verificationNudgeLimit, 20)
+  assert.equal(c.securityScan, true, 'a non-boolean falls back to the default')
   assert.equal(c.prematureStopMaxContinuations, 0)
 })
 

@@ -26,7 +26,7 @@ test('every package entry point resolves inside the loaded tree', () => {
 
 test('control center exposes persistent editable settings', () => {
   const text = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  for (const marker of ['Save settings', 'Reset to profile defaults', 'Premature-stop guard', 'Gate subagents', 'Security regression scan', 'Maximum changed files', 'Verification nudge limit']) {
+  for (const marker of ['Save settings', 'Reset to profile defaults', 'Premature-stop guard', 'Gate subagents', 'Security regression scan', 'Maximum changed files']) {
     assert.equal(text.includes(marker), true, `missing UI marker: ${marker}`)
   }
   assert.equal(text.includes("api('/settings'"), true)

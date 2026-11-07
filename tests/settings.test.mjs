@@ -36,15 +36,16 @@ test('saved UI overlay wins over profile config and reset file removal is safe',
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })
 
-test('verificationNudgeLimit round-trips and a saved overlay wins over the profile value', () => {
+test('a retired key is dropped on read and a saved overlay wins over the profile value', () => {
   const { dir, file } = tempFile()
   try {
     const defaults = builtInDefaults()
-    assert.equal(defaults.verificationNudgeLimit, 3, 'the documented default must not drift')
-    writeSavedSettings(file, { ...defaults, verificationNudgeLimit: 1 })
+    assert.equal('verificationNudgeLimit' in defaults, false, 'a retired key must not be defaulted')
+    writeSavedSettings(file, { ...defaults, verificationNudgeLimit: 1, maxChangedFiles: 900 })
     const saved = readSavedSettings(file)
-    assert.equal(saved.verificationNudgeLimit, 1)
-    const merged = mergeSettings({ ...defaults, verificationNudgeLimit: 2 }, saved)
-    assert.equal(merged.verificationNudgeLimit, 1)
+    assert.equal('verificationNudgeLimit' in saved, false, 'a saved retired key must not survive the read')
+    assert.equal(saved.maxChangedFiles, 900)
+    const merged = mergeSettings({ ...defaults, maxChangedFiles: 200 }, saved)
+    assert.equal(merged.maxChangedFiles, 900)
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })

@@ -460,7 +460,8 @@ test('a changed file whose added lines could not be read is named even when no c
   await stop(svc, agent)
   assert.equal(agent.steers.length, 1, 'an unread file must send a message even when the repository is complete')
   const text = steerText(agent.steers[0])
-  assert.match(text, /1 changed file could not be read for this scan/, 'the gap line must name the unread file')
+  assert.match(text, /1 changed file could not be read for this scan/, 'the heading must count the unread file')
+  assert.match(text, /^- file #0: transient read failure$/m, 'the unread file must be listed on its own line with its read error')
   assertAdvisory(text)
 })
 
@@ -542,7 +543,8 @@ for (const kind of ['binary', 'oversized']) {
     await stop(svc, agent)
     assert.equal(agent.steers.length, 1, `the ${kind} file must send a message even when the repository is complete`)
     const text = steerText(agent.steers[0])
-    assert.match(text, /1 changed file could not be read for this scan/, 'the gap line must name the unread file')
+    assert.match(text, /1 changed file could not be read for this scan/, 'the heading must count the unread file')
+    assert.match(text, new RegExp(`^- app\\.js: ${kind}$`, 'm'), `the advisory must list app.js on its own line with its kind ${kind}`)
     assertAdvisory(text)
   })
 }

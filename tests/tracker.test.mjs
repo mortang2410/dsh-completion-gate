@@ -240,6 +240,28 @@ test('a later attest replaces an unrelated mark with passed and then assumed', a
   assert.ok((await linesOf(svc, a)).includes('- audit: Audit | assumed, not run: the audit log needs data this session does not have'), 'a later attest replaces the mark with assumed and keeps its reason')
 })
 
+// The exported RepositoryTracker keeps reopenChanged's return contract: the reopened roots as sorted strings. The reopen
+// notice asks hasUnrelatedMark for the fact it prints, so the shape a caller of the exported class already uses does not
+// change (personal#f3za).
+test('reopenChanged returns the reopened roots as sorted strings', async t => {
+  const session = attestRepo()
+  const sibling = attestRepo()
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent({ cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js', path.join(sibling, 'app.js')])
+  const claims = { claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'] }
+  for (const root of [session, sibling]) {
+    const result = await svc.__tool.execute(attestArgs(root, { ...claims, items: [] }), execOf(a))
+    assert.equal(result.pass, true, result.markdown)
+  }
+  fs.writeFileSync(path.join(session, 'app.js'), 'const value = 2\n')
+  fs.writeFileSync(path.join(sibling, 'app.js'), 'const value = 3\n')
+  await svc.repositories.refresh(a.id)
+  assert.deepEqual(svc.repositories.reopenChanged(a.id), [session, sibling].sort())
+})
+
 test('attest refuses each malformed argument and each unknown path or item with its message, and changes nothing', async t => {
   const { session, svc, a } = await attestFixture(t)
   const before = JSON.stringify(await svc.repositoryReport(a))

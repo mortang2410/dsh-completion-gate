@@ -130,30 +130,57 @@ test('/state returns settings, one row per session with repository rows, and a p
   assert.equal('verification' in response.body, false)
 })
 
-test('/state reflects a claim and reviewed state after attest, and a stale attestation after a reopen', async t => {
+test('/state reflects claims, item states, and a stale attestation after a reopen', async t => {
   const session = tempGitRepo(t)
+  fs.writeFileSync(path.join(session, 'other.js'), 'const other = 1\n')
   const summaries = new Map()
   const svc = statusService(summaries)
   t.after(() => cleanupService(svc))
   const a = agent([], { cwd: session })
-  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  announceTurn(svc, a, summaries, 1, session, ['app.js', 'other.js'])
   await svc.stopping({ agent: a, turn: 1, signal: new AbortController().signal })
-  const attested = await svc.__tool.execute(attestArgs(session, { claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'], items: [] }), execOf(a))
+  await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Unit', proves: 'app.js sets value' }] }, execOf(a))
+  const attested = await svc.__tool.execute(attestArgs(session, {
+    claims: [{ path: 'app.js', decision: 'mine' }, { path: 'other.js', decision: 'not-mine' }],
+    reviewed_code_files: ['app.js'], items: [{ id: 'unit', state: 'unrelated' }],
+  }), execOf(a))
   assert.equal(attested.pass, true, attested.markdown)
   let response = await apiCall(svc, 'GET', '/api/completion-gate/v1/state')
   let repo = response.body.sessions[0].repositories[0]
-  assert.deepEqual(repo.files.map(file => [file.path, file.claim, file.reviewed]), [['app.js', 'mine', true]])
+  assert.deepEqual(repo.files.map(file => [file.path, file.claim, file.reviewed]), [['app.js', 'mine', true], ['other.js', 'not-mine', false]])
+  assert.deepEqual(repo.claimCounts, { mine: 1, notMine: 1, unclaimed: 0 })
+  assert.deepEqual(repo.items.map(item => [item.id, item.state]), [['unit', 'unrelated']], 'an unrelated item state reaches the panel')
   assert.equal(repo.attestation, 'current')
   assert.equal(response.body.pending, 0)
   fs.writeFileSync(path.join(session, 'app.js'), 'const value = 2\n')
   await svc.repositoryReport(a)
   response = await apiCall(svc, 'GET', '/api/completion-gate/v1/state')
   repo = response.body.sessions[0].repositories[0]
-  assert.deepEqual(repo.files.map(file => [file.path, file.claim, file.reviewed]), [['app.js', 'unclaimed', false]], 'a recorded content change clears the claim and reviewed state')
+  assert.deepEqual(repo.files.map(file => [file.path, file.claim, file.reviewed]), [['app.js', 'unclaimed', false], ['other.js', 'unclaimed', false]], 'a recorded content change clears every claim and reviewed state')
+  assert.deepEqual(repo.claimCounts, { mine: 0, notMine: 0, unclaimed: 2 })
+  assert.deepEqual(repo.items.map(item => [item.id, item.state]), [['unit', 'unrelated']], 'the unrelated mark survives the reopen')
   assert.equal(repo.attestation, 'stale')
   assert.equal(response.body.pending, 1)
 })
 
+
+// The panel reads the tracker, so a premature-stop recovery must file the turn before it returns. The recovery
+// follow-up still runs, and the same stop leaves the session and repository visible to /state.
+test('a premature-stop recovery still files the changed repository for the panel', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  emit(svc, a, 'assistant/message', { turn: 1, message: { content: [{ type: 'text', text: 'Now I need to inspect the call site.' }] } })
+  await svc.stopping({ agent: a, turn: 1, signal: new AbortController().signal })
+  assert.equal(a.followups.length, 1, 'the recovery follow-up still runs')
+  const response = await apiCall(svc, 'GET', '/api/completion-gate/v1/state')
+  assert.equal(response.body.sessions.length, 1, 'the panel gets the session during recovery')
+  assert.equal(response.body.sessions[0].repositories[0].root, session)
+  assert.equal(response.body.pending, 1)
+})
 
 test('empty recovery turn is retried with another bounded follow-up',async()=>{
  const svc=liveService({prematureStopMaxContinuations:3})

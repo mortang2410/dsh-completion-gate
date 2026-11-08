@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { CompletionGateService } from '../lib/index.js'
 import {
-  EDITABLE_KEYS, SETTINGS_SCHEMA_VERSION, builtInDefaults, mergeSettings, readSavedSettings,
+  SETTINGS_SCHEMA_VERSION, builtInDefaults, mergeSettings, readSavedSettings,
   removeSavedSettings, settingsSummary, writeSavedSettings,
 } from '../lib/settings.js'
 
@@ -64,10 +64,20 @@ function textOf(node) {
   return ''
 }
 
+// How many elements of one class a rendered tree contains, so the panel's control count is asserted structurally
+// instead of by counting title strings.
+function countClass(node, name) {
+  if (!node || typeof node !== 'object') return 0
+  if (Array.isArray(node)) return node.reduce((total, child) => total + countClass(child, name), 0)
+  let total = node.props?.className === name ? 1 : 0
+  if (typeof node.type === 'function') total += countClass(node.type(node.props), name)
+  else total += countClass(node.children, name)
+  return total
+}
+
 test('the settings summary has exactly the six surviving keys', () => {
   const summary = settingsSummary(builtInDefaults())
   assert.deepEqual(Object.keys(summary).sort(), SIX_KEYS)
-  assert.deepEqual([...EDITABLE_KEYS].sort(), SIX_KEYS, 'the editable key list is the six surviving keys')
   assert.equal(SETTINGS_SCHEMA_VERSION, 2, 'the settings schema version is 2')
   for (const retired of ['verificationNudgeLimit', 'mode']) {
     assert.equal(retired in summary, false, `the summary carries no retired key: ${retired}`)
@@ -78,10 +88,10 @@ test('a saved schema-1 settings file is ignored until the next save writes schem
   const { dir, file } = tempFile()
   try {
     fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, settings: { gateSubagents: true, maxChangedFiles: 42 } }))
-    const svc = new CompletionGateService({}, { gateSubagents: false, maxChangedFiles: 500 }, { settingsPath: file })
+    const svc = new CompletionGateService({}, { gateSubagents: false, maxChangedFiles: 700 }, { settingsPath: file })
     assert.equal(svc.hasSavedSettings, false, 'the schema-1 file is not applied')
     assert.equal(svc.config.gateSubagents, false, 'the default gateSubagents applies')
-    assert.equal(svc.config.maxChangedFiles, 500, 'the profile maxChangedFiles applies')
+    assert.equal(svc.config.maxChangedFiles, 700, 'the profile maxChangedFiles applies, not the ignored file value')
     svc.updateSettings({ maxChangedFiles: 400 })
     const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
     assert.equal(saved.schemaVersion, 2, 'the next save writes schema 2')
@@ -121,14 +131,14 @@ test('the editable keys, defaults, and bundle patch agree', () => {
 test('save and reset round-trip against schema 2', () => {
   const { dir, file } = tempFile()
   try {
-    const svc = new CompletionGateService({}, { maxChangedFiles: 500 }, { settingsPath: file })
+    const svc = new CompletionGateService({}, { maxChangedFiles: 700 }, { settingsPath: file })
     svc.updateSettings({ maxChangedFiles: 42, gateSubagents: true })
     assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).schemaVersion, 2)
     assert.equal(svc.hasSavedSettings, true)
     svc.resetSettings()
     assert.equal(fs.existsSync(file), false, 'reset removes the saved file')
     assert.equal(svc.hasSavedSettings, false)
-    assert.equal(svc.config.maxChangedFiles, 500, 'reset restores the profile value')
+    assert.equal(svc.config.maxChangedFiles, 700, 'reset restores the profile value')
     assert.equal(svc.config.gateSubagents, false, 'reset restores the default')
     assert.equal(removeSavedSettings(file), false, 'a second removal is safe')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
@@ -164,13 +174,15 @@ test('saved UI overlay wins over profile config and reset file removal is safe',
 test('the control-center panel renders the six surviving settings and no retired control', () => {
   const half = loadClientHalf()
   const draft = builtInDefaults()
-  const text = textOf(half.SettingsFields({ draft, update: () => {} }))
+  const tree = half.SettingsFields({ draft, update: () => {} })
+  const text = textOf(tree)
   for (const title of ['Enable Completion Gate', 'Gate subagents', 'Premature-stop guard', 'Max recovery follow-ups', 'Security regression scan', 'Maximum changed files']) {
     assert.ok(text.includes(title), `the panel renders ${title}`)
   }
   for (const retired of ['Mode', 'Command timeout', 'Output bound', 'Custom check', 'Changed workspace', 'Attestation required']) {
     assert.equal(text.includes(retired), false, `the panel renders no retired control: ${retired}`)
   }
+  assert.equal(countClass(tree, 'cg-field'), 6, 'the panel has exactly six setting controls')
 })
 
 test('the panel renders a session row, a repository block, and each changed file claim and reviewed state', () => {
@@ -181,25 +193,49 @@ test('the panel renders a session row, a repository block, and each changed file
     sessions: [{
       id: 'session-1',
       pending: 1,
-      repositories: [{
-        root: '/repo/alpha',
-        label: 'alpha',
-        attestation: 'missing',
-        claimCounts: { mine: 1, notMine: 0, unclaimed: 1 },
-        items: [{ id: 'unit', name: 'Unit', state: 'passed' }],
-        files: [
-          { path: 'src/app.js', claim: 'mine', reviewed: true, documentation: false },
-          { path: 'NOTES.md', claim: 'unclaimed', reviewed: false, documentation: true },
-        ],
-      }],
+      repositories: [
+        {
+          root: '/repo/alpha', label: 'alpha', attestation: 'missing', pending: true,
+          claimCounts: { mine: 1, notMine: 0, unclaimed: 1 },
+          items: [{ id: 'unit', name: 'Unit', state: 'passed' }],
+          files: [
+            { path: 'src/app.js', claim: 'mine', reviewed: true, documentation: false },
+            { path: 'NOTES.md', claim: 'unclaimed', reviewed: false, documentation: true },
+          ],
+        },
+        {
+          root: '/repo/beta', label: 'beta', attestation: 'current', pending: false,
+          claimCounts: { mine: 0, notMine: 1, unclaimed: 0 },
+          items: [
+            { id: 'e2e', name: 'E2E', state: 'assumed', reason: 'needs a database' },
+            { id: 'old', name: 'Old', state: 'unrelated' },
+          ],
+          files: [{ path: 'lib/beta.js', claim: 'not-mine', reviewed: false, documentation: false }],
+        },
+        {
+          root: '/repo/gamma', label: 'gamma', attestation: 'stale', pending: false,
+          claimCounts: { mine: 0, notMine: 0, unclaimed: 0 }, items: [], files: [],
+        },
+      ],
     }],
   }
   const text = textOf(half.PanelBody({
     state, draft: state.settings, dirty: false, busy: false, message: '', error: '',
     save: () => {}, reset: () => {}, update: () => {},
   }))
-  for (const marker of ['session-1', 'alpha', 'src/app.js - mine - reviewed', 'NOTES.md - unclaimed - unreviewed', 'unit', 'passed', 'missing']) {
+  for (const marker of [
+    'session-1', '1 pending repository',
+    'alpha', 'Attestation: missing', '1 mine · 0 rejected · 1 unclaimed · pending',
+    'src/app.js - mine - reviewed', 'NOTES.md - unclaimed - unreviewed', 'unit: Unit - passed',
+    'beta', 'Attestation: current', '0 mine · 1 rejected · 0 unclaimed · complete',
+    'lib/beta.js - not-mine - unreviewed',
+    'e2e: E2E - assumed, not run: needs a database', 'old: Old - unrelated to this session',
+    'gamma', 'Attestation: stale', 'No changed file.',
+  ]) {
     assert.ok(text.includes(marker), `the panel renders ${marker}`)
+  }
+  for (const retired of ['Machine evidence', 'Completion evidence', 'Execution limits', 'Verification sources', 'Custom check', 'Verification overview']) {
+    assert.equal(text.includes(retired), false, `the panel renders no retired section: ${retired}`)
   }
   assert.equal(text.includes('No session has changed a file yet'), false)
   assert.ok(text.includes('Enable Completion Gate'), 'the same panel still renders the surviving settings')

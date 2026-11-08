@@ -8,4 +8,3 @@
         prematureStopMaxContinuations: 3
         securityScan: true
         maxChangedFiles: 500
-        verificationNudgeLimit: 3

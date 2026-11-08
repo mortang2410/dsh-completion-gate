@@ -95,6 +95,65 @@ test('settings API saves live policy and reset endpoint restores profile default
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })
 
+// The operator panel reads /state, so the snapshot must project the per-session tracker, not wait for a later gate run.
+// This is the projection the ticket adds: a stop files the turn, and /state then carries one session row with one block
+// per repository, each file's claim and reviewed state, and a pending count. The verification overview is gone.
+test('/state returns settings, one row per session with repository rows, and a pending count', async t => {
+  const session = tempGitRepo(t)
+  const other = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  const b = agent([], { cwd: other })
+  b.id = 'b'
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  await svc.stopping({ agent: a, turn: 1, signal: new AbortController().signal })
+  announceTurn(svc, b, summaries, 1, other, ['app.js'])
+  await svc.stopping({ agent: b, turn: 1, signal: new AbortController().signal })
+  const response = await apiCall(svc, 'GET', '/api/completion-gate/v1/state')
+  assert.equal(response.status, 200)
+  assert.deepEqual(Object.keys(response.body.settings).sort(), ['enabled', 'gateSubagents', 'maxChangedFiles', 'prematureStopMaxContinuations', 'preventPrematureStops', 'securityScan'])
+  assert.equal(response.body.pending, 2, 'both repositories are unfinished')
+  assert.equal(response.body.sessions.length, 2, 'each session has one row')
+  const sessionA = response.body.sessions.find(row => row.id === a.id)
+  assert.ok(sessionA, 'the session that stopped appears without a later gate run')
+  assert.equal(sessionA.pending, 1)
+  assert.equal(sessionA.repositories.length, 1)
+  const repo = sessionA.repositories[0]
+  assert.equal(repo.root, session)
+  assert.equal(repo.label, path.basename(session))
+  assert.deepEqual(repo.claimCounts, { mine: 0, notMine: 0, unclaimed: 1 })
+  assert.equal(repo.attestation, 'missing')
+  assert.deepEqual(repo.files.map(file => [file.path, file.claim, file.reviewed]), [['app.js', 'unclaimed', false]])
+  assert.equal('overview' in response.body, false, 'the state no longer carries the verification overview')
+  assert.equal('verification' in response.body, false)
+})
+
+test('/state reflects a claim and reviewed state after attest, and a stale attestation after a reopen', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  announceTurn(svc, a, summaries, 1, session, ['app.js'])
+  await svc.stopping({ agent: a, turn: 1, signal: new AbortController().signal })
+  const attested = await svc.__tool.execute(attestArgs(session, { claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'], items: [] }), execOf(a))
+  assert.equal(attested.pass, true, attested.markdown)
+  let response = await apiCall(svc, 'GET', '/api/completion-gate/v1/state')
+  let repo = response.body.sessions[0].repositories[0]
+  assert.deepEqual(repo.files.map(file => [file.path, file.claim, file.reviewed]), [['app.js', 'mine', true]])
+  assert.equal(repo.attestation, 'current')
+  assert.equal(response.body.pending, 0)
+  fs.writeFileSync(path.join(session, 'app.js'), 'const value = 2\n')
+  await svc.repositoryReport(a)
+  response = await apiCall(svc, 'GET', '/api/completion-gate/v1/state')
+  repo = response.body.sessions[0].repositories[0]
+  assert.deepEqual(repo.files.map(file => [file.path, file.claim, file.reviewed]), [['app.js', 'unclaimed', false]], 'a recorded content change clears the claim and reviewed state')
+  assert.equal(repo.attestation, 'stale')
+  assert.equal(response.body.pending, 1)
+})
+
 
 test('empty recovery turn is retried with another bounded follow-up',async()=>{
  const svc=liveService({prematureStopMaxContinuations:3})

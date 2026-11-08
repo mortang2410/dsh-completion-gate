@@ -11,7 +11,7 @@ Repository discovery reads the filesystem for the nearest `.git` entry and start
 - reading a nested repository's HEAD;
 - resolving the path of the repository's local exclude file before `.dsh/` is appended to it.
 
-Those calls read and append. They never verify, build, or test anything.
+Those calls only read. The gate appends the exclude line itself with a file write, and nothing here verifies, builds, or tests.
 
 ## The catalog is knowledge
 

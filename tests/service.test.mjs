@@ -139,17 +139,20 @@ test('/state reflects claims, item states, and a stale attestation after a reope
   const a = agent([], { cwd: session })
   announceTurn(svc, a, summaries, 1, session, ['app.js', 'other.js'])
   await svc.stopping({ agent: a, turn: 1, signal: new AbortController().signal })
-  await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Unit', proves: 'app.js sets value' }] }, execOf(a))
+  await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Unit', proves: 'app.js sets value' }, { name: 'End to end', proves: 'the suite reaches the database' }] }, execOf(a))
+  const assumedReason = 'The suite needs a database this session does not have.'
   const attested = await svc.__tool.execute(attestArgs(session, {
     claims: [{ path: 'app.js', decision: 'mine' }, { path: 'other.js', decision: 'not-mine' }],
-    reviewed_code_files: ['app.js'], items: [{ id: 'unit', state: 'unrelated' }],
+    reviewed_code_files: ['app.js'], items: [{ id: 'unit', state: 'unrelated' }, { id: 'end-to-end', state: 'assumed', reason: assumedReason }],
   }), execOf(a))
   assert.equal(attested.pass, true, attested.markdown)
   let response = await apiCall(svc, 'GET', '/api/completion-gate/v1/state')
   let repo = response.body.sessions[0].repositories[0]
   assert.deepEqual(repo.files.map(file => [file.path, file.claim, file.reviewed]), [['app.js', 'mine', true], ['other.js', 'not-mine', false]])
   assert.deepEqual(repo.claimCounts, { mine: 1, notMine: 1, unclaimed: 0 })
-  assert.deepEqual(repo.items.map(item => [item.id, item.state]), [['unit', 'unrelated']], 'an unrelated item state reaches the panel')
+  // The panel renders the item's name and an assumed item's reason, so /state must carry both fields to it.
+  assert.deepEqual(repo.items.map(item => [item.id, item.name, item.state]), [['unit', 'Unit', 'unrelated'], ['end-to-end', 'End to end', 'assumed']], 'an unrelated item state and an item name reach the panel')
+  assert.deepEqual(repo.items.map(item => item.reason), [undefined, assumedReason], 'an assumed item reason reaches the panel')
   assert.equal(repo.attestation, 'current')
   assert.equal(response.body.pending, 0)
   fs.writeFileSync(path.join(session, 'app.js'), 'const value = 2\n')
@@ -158,7 +161,9 @@ test('/state reflects claims, item states, and a stale attestation after a reope
   repo = response.body.sessions[0].repositories[0]
   assert.deepEqual(repo.files.map(file => [file.path, file.claim, file.reviewed]), [['app.js', 'unclaimed', false], ['other.js', 'unclaimed', false]], 'a recorded content change clears every claim and reviewed state')
   assert.deepEqual(repo.claimCounts, { mine: 0, notMine: 0, unclaimed: 2 })
-  assert.deepEqual(repo.items.map(item => [item.id, item.state]), [['unit', 'unrelated']], 'the unrelated mark survives the reopen')
+  // A reopen keeps only the unrelated mark, so the assumed statement is cleared with the attestation it belonged to.
+  assert.deepEqual(repo.items.map(item => [item.id, item.name, item.state]), [['unit', 'Unit', 'unrelated'], ['end-to-end', 'End to end', null]], 'the unrelated mark survives the reopen and the assumed state clears with it')
+  assert.deepEqual(repo.items.map(item => item.reason), [undefined, undefined], 'the cleared item carries no stale reason')
   assert.equal(repo.attestation, 'stale')
   assert.equal(response.body.pending, 1)
 })

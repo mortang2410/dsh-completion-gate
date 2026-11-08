@@ -12,7 +12,7 @@ A session often starts in one folder and works in another. The starting folder m
 
 The earlier design also ran verification itself. It detected test, build, lint, and typecheck commands, executed them, generated temporary probes, and judged completion from their output. That put a plugin in charge of code execution the owner did not ask it to perform.
 
-The owner decided two things. The model runs verification, not the gate. And the gate believes the model's report of what it ran. What the gate records is a set of completion commitments: which changed files belong to this session, which code files were reviewed, whether changed documentation was checked, and the state of every verification item the session committed to.
+The operator decided two things. The model runs verification, not the gate. And the gate believes the model's report of what it ran. What the gate records is a set of completion commitments: which changed files belong to this session, which code files were reviewed, whether changed documentation was checked, and the state of every verification item the session committed to.
 
 Completion Gate is advisory. It never refuses a write, never blocks a tool call, and never stops a turn from ending. It can waste a reminder when its rules are wrong, and that is the whole cost of a mistake.
 
@@ -25,7 +25,7 @@ Completion Gate is advisory. It never refuses a write, never blocks a tool call,
 3. The gate merges the result into one ledger per session per repository.
 4. When the model tries to end the turn, the gate speaks at most once for that user prompt. The message lists what each repository still owes. A repository with nothing unfinished contributes nothing.
 
-The gate starts no project process. It starts Git only for three jobs: repository discovery, reading a nested repository's HEAD, and appending the catalog's exclude line.
+Repository discovery walks `.git` entries on the filesystem and starts no process. The gate starts Git only to read a nested repository's HEAD and to resolve the local exclude file.
 
 ### The repository scanner
 
@@ -81,7 +81,7 @@ Each repository carries a small catalog at `.dsh/verification.json`. It holds th
 }
 ```
 
-Each item has a name, a required `proves` comment stating what passing it establishes, and an optional command for reproducibility. The `id` is a stable slug derived from the name when the item is created and is kept across updates. Registering an item with an existing name updates its comment and command and keeps its id.
+Each item has a name, a required `proves` comment stating what passing it establishes, and an optional command for reproducibility. The `id` is a stable slug derived from the name when the item is created and is kept across updates. Registering an item with an existing name replaces its `proves` comment, keeps its id, and sets its command: an omitted command removes the stored one.
 
 The command field is documentation. The gate never runs it.
 
@@ -174,7 +174,7 @@ Six settings remain.
 | `preventPrematureStops` | `true` | Recover a natural stop that clearly says work is still pending by scheduling a fresh follow-up turn. |
 | `prematureStopMaxContinuations` | `3` | Safety cap across one consecutive premature-stop recovery chain, from 0 to 20. |
 | `securityScan` | `true` | Scan the turn's added lines for high-confidence credential and secret patterns. |
-| `maxChangedFiles` | `500` | Safety bound on the changed-file inventory, from 10 to 5000. A turn over the bound is reported as truncated. |
+| `maxChangedFiles` | `500` | Safety bound on the changed-file inventory, from 10 to 5000. A turn over the bound is reported as an incomplete change set. |
 
 The saved settings file uses schema version 2. A schema-1 file is ignored and the profile configuration applies until the next save. The settings file path is not returned to the browser.
 
@@ -250,20 +250,20 @@ The recorder is the source of truth, and it has limits the gate cannot fix.
 - Ignored paths are listed only when a file tool captures them.
 - A path already dirty at turn start is part of the baseline and is not listed.
 - Nested repositories and submodules are listed as their directory path, so their inner files are unseen. A moved HEAD is seen.
-- A nested repository whose HEAD cannot be read is named at the stop, and attestation for the repository that contains it is refused until its HEAD reads again.
+- A nested repository whose HEAD cannot be read is named at the stop. When it has a previously read HEAD, that value stands in, its attestation stays current for the recorded commit, and the gate says it could not check the current commit. When it has never been read, attestation of that nested repository is refused until its HEAD reads again.
 - A missing record after a turn ends is read as no change. The host also writes no record when recording fails, when the turn-start baseline fails, and when the turn has no tool result. The gate cannot tell those cases apart.
 - A session's record is author-blind. A listed file may have been written by another process or another session. The model's claim or rejection is the attribution, and the gate believes it.
 - A subagent session is not recorded at all. With `gateSubagents` enabled, the child reports an undetermined change set.
 - The gate believes the model, so a false claim is accepted by design.
 - Reopening sees only the paths the recorder lists. A change it omits cannot reopen an attestation.
 - A host restart loses session claims and attestations. The catalog survives in the repository.
-- A turn that changes more files than `maxChangedFiles` is reported as truncated, and the files beyond the bound are not attributed.
+- A turn that changes more files than `maxChangedFiles` is reported in the advisory as an incomplete change set, because the complete set cannot be determined.
 
 These limits are stated here rather than hidden. A wrong limit can cost a reminder; it cannot block a session.
 
 ### Recovery uses a fresh turn
 
-The Premature Stop Guard uses `agent.followup`, not `agent.steer`. The follow-up lets the naturally stopped turn close and wakes a new turn with the unfinished-work instruction. The advisory message uses `agent.steer` because it must ride the same turn before its boundary commits.
+The Premature Stop Guard uses `agent.followup`, not `agent.steer`. The follow-up lets the naturally stopped turn close and wakes a new turn with the unfinished-work instruction.
 
 ---
 

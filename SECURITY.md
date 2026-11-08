@@ -6,11 +6,10 @@ Completion Gate is a local DSH host plugin. It is an advisory tracker: it record
 
 The gate executes no test, build, lint, typecheck, recipe, or temporary probe. It writes no test result, reads no verification output, and has no code path that runs a project command. A catalog item's `command` field is documentation for the next session; the gate never executes it.
 
-The only process the gate may start is Git, for three jobs:
+Repository discovery reads the filesystem for the nearest `.git` entry and starts no process. The only process the gate may start is Git, for two jobs:
 
-- repository discovery, when it resolves a changed path to its owning repository root;
 - reading a nested repository's HEAD;
-- appending `.dsh/` to a repository's local exclude file.
+- resolving the path of the repository's local exclude file before `.dsh/` is appended to it.
 
 Those calls read and append. They never verify, build, or test anything.
 

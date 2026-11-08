@@ -113,7 +113,7 @@ One attestation call covers one repository. The model calls the `completion_gate
 
 A claimed file is a code file when its path is not documentation by the extension and basename rule. Every claimed code file must appear in `reviewed_code_files`. Every changed file starts unreviewed, and a file the latest attestation does not cover stays unreviewed.
 
-A malformed call changes nothing and returns the schema error. A well-formed but incomplete call is stored and returns the remaining problems, so the model can correct it and attest again. The gate never verifies the claims, never checks whether a command ran, and never compares the report with tool events.
+A malformed call changes nothing and returns the schema error. A call the gate refuses changes nothing either and says why: a path that is not a changed file, an item id that is not in the catalog, a changed file it cannot read, or a nested repository with no readable HEAD. A well-formed call that leaves work undone is stored and returns the remaining problems, so the model can correct it and attest again. The gate never verifies the claims, never checks whether a command ran, and never compares the report with tool events.
 
 Attestation is the last action of a turn by instruction. Code that changes after it is handled by reopening, not by asking the model to attest mid-turn.
 
@@ -133,7 +133,7 @@ The gate speaks only when the model tries to end a turn, and at most once per us
 
 The message covers every repository the session has touched that still has unfinished work. A repository appears with its label and root, the changed files grouped by claim, the code files not yet reviewed, the documentation check when it is missing, every catalog item with its state, and whether the attestation is missing or stale. An item marked unrelated is left out. A repository seen for the first time in this session gets one introduction paragraph that names the repository, points at its catalog, and asks the model to register the verification it will run. The introduction appears once.
 
-The message is delivered with `agent.steer`, which queues one more model step in the same turn before the turn boundary commits. It never blocks a write or a tool call. After that one steer the gate sends no further message in the turn, and the turn closes at a later stop boundary where no new steering is queued.
+The message is delivered with `agent.steer`, which queues one more model step in the same turn before the turn boundary commits. It never blocks a write or a tool call. After that one steer the gate sends no further message until another real user message arrives.
 
 The message says it is advice and names the next action: read the catalog, register what is missing, claim or reject every file, review every changed code file the session claims, check every changed document it has not rejected, then honestly attest. It never says BLOCKED and never claims a check failed.
 

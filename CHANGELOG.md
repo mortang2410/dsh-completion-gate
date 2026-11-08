@@ -11,9 +11,9 @@ Advisory multi-repository completion tracker. The gate no longer runs verificati
 - Add the `passed`, `assumed`, and `unrelated` item states. An assumed item requires a reason and is always reported as a promise, not a pass.
 - Reopen a repository when a recorded path is added or a recorded file's content changes after its attestation, clearing claims, reviews, and item states except an unrelated mark.
 - Send at most one batched advisory message per user prompt, with an introduction for each repository the session sees for the first time. The message advises, never says BLOCKED, and never claims a check failed.
-- Keep the added-line credential scan and report its hits with the rule and count, never the matched text.
+- Keep the added-line security scan and report its hits with the rule and count, never the matched text.
 - Keep the Premature Stop Guard and its continuation cap.
-- Add the `register`, `attest`, and `status` tool actions. The `run`, `recipe`, and `temporary_verify` actions and the `/gate-override` command are removed.
+- Keep the `register`, `attest`, and `status` tool actions with the advisory behavior. The `run`, `recipe`, and `temporary_verify` actions and the `/gate-override` command are removed.
 - Reduce the settings to `enabled`, `gateSubagents`, `preventPrematureStops`, `prematureStopMaxContinuations`, `securityScan`, and `maxChangedFiles`. The settings schema becomes version 2.
 - Retire the machine-check runner, check detection, recipes, the recipe runner, the temporary verifier, the verification ledger, custom checks, the acceptance-criteria field, the TODO scan, the mode switch, and the operator override.
 - Rewrite the README, SECURITY.md, and the Completion section of the host AGENTS.md for the advisory workflow.

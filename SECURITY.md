@@ -19,9 +19,9 @@ Those calls only read. The gate appends the exclude line itself with a file writ
 
 The gate adds `.dsh/` to the repository's local exclude file, so the catalog is not committed. The tracked `.gitignore` is never edited.
 
-## Credential scan
+## Security scan
 
-The added-line scan is kept. When `securityScan` is enabled, the gate reads the turn's added lines from the host change recorder and looks for a deliberately narrow set of high-confidence patterns, such as a likely hard-coded credential. The advisory names the rule and the number of matching lines, never the matched text. A changed file whose added lines cannot be read is named so the scan's gap is visible.
+The added-line scan is kept. When `securityScan` is enabled, the gate reads the turn's added lines from the host change recorder and looks for a deliberately narrow set of high-confidence rules: likely hard-coded credentials, disabled TLS verification, dynamic eval or Function construction, world-writable permissions, shell execution enabled, and raw HTML injection. The advisory names the rule and the number of matching lines, never the matched text. A changed file whose added lines cannot be read is named so the scan's gap is visible.
 
 The scan is a regression tripwire, not a substitute for a dedicated secret scanner, dependency scanner, or human security review.
 

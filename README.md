@@ -131,7 +131,7 @@ Reopening is bounded by the change source. A path the host record omits cannot r
 
 The gate speaks only when the model tries to end a turn, and at most once per user prompt. It takes the first attempt of the prompt that has something to say and stays silent at every later attempt.
 
-The message covers every repository the session has touched that still has unfinished work. A repository appears with its label and root, the files by claim and reviewed state, the code files not yet reviewed, the documentation check when it is missing, every catalog item with its state, and whether the attestation is missing or stale. An item marked unrelated is left out. A repository seen for the first time in this session gets one introduction paragraph that names the repository, points at its catalog, and asks the model to register the verification it will run. The introduction appears once.
+The message covers every repository the session has touched that still has unfinished work. A repository appears with its label and root, the changed files grouped by claim, the code files not yet reviewed, the documentation check when it is missing, every catalog item with its state, and whether the attestation is missing or stale. An item marked unrelated is left out. A repository seen for the first time in this session gets one introduction paragraph that names the repository, points at its catalog, and asks the model to register the verification it will run. The introduction appears once.
 
 The message is delivered with `agent.steer`, which queues one more model step in the same turn before the turn boundary commits. It never blocks a write or a tool call. After that one steer the gate sends no further message in the turn, and the turn closes at a later stop boundary where no new steering is queued.
 
@@ -151,9 +151,9 @@ The gate reports an undetermined change set, in one short message under the same
 
 An ended session the recorder covers with no announcement is read as unchanged and produces no message. The host's silent failure cases stay an accepted false-negative limit.
 
-### Credential hits
+### Security-scan hits
 
-When the security scan is enabled, the message also reports added-line credential-pattern hits for the turn. A hit is advice about the diff, not a claim the model can answer. It rides the one message for the prompt, and a hit recorded after that message waits for the next user prompt. Only the rule message is shown, never the matched text. A changed file whose added lines could not be read is named so the scan's gap is visible.
+When the security scan is enabled, the message also reports added-line security-rule hits for the turn. A hit is advice about the diff, not a claim the model can answer. It rides the one message for the prompt, and a hit recorded after that message waits for the next user prompt. Only the rule message is shown, never the matched text. A changed file whose added lines could not be read is named so the scan's gap is visible.
 
 ### The Premature Stop Guard
 
@@ -173,12 +173,12 @@ Six settings remain.
 | `gateSubagents` | `false` | Include subagent stop boundaries. Off is recommended because the recorder does not record subagent sessions. |
 | `preventPrematureStops` | `true` | Recover a natural stop that clearly says work is still pending by scheduling a fresh follow-up turn. |
 | `prematureStopMaxContinuations` | `3` | Safety cap across one consecutive premature-stop recovery chain, from 0 to 20. |
-| `securityScan` | `true` | Scan the turn's added lines for high-confidence credential and secret patterns. |
+| `securityScan` | `true` | Scan the turn's added lines for high-confidence credential and unsafe-code patterns. |
 | `maxChangedFiles` | `500` | Safety bound on the changed-file inventory, from 10 to 5000. A turn over the bound is reported as an incomplete change set. |
 
 The saved settings file uses schema version 2. A schema-1 file is ignored and the profile configuration applies until the next save. The settings file path is not returned to the browser.
 
-The machine-check keys, the recipe keys, the temporary-verifier key, the command timeout, the stored-output bound, custom checks, the attestation toggle, and the changed-workspace toggle are gone. The mode selection is gone because the gate is advisory only.
+The machine-check keys, the recipe keys, the temporary-verifier key, the command timeout, the stored-output bound, custom checks, the attestation toggle, the changed-workspace toggle, the TODO-marker key, and the nudge limit are gone. The mode selection is gone because the gate is advisory only.
 
 ---
 

@@ -50,3 +50,15 @@ test('README is complete enough for a new operator', () => {
   assert.match(text, /Reset to profile defaults/)
   assert.doesNotMatch(text, /packaged \.tgz|npm package|install the packaged/i)
 })
+
+// Spec section 11 fixes what the model reads at the start of every session. A retitled or trimmed paragraph would
+// silently drop one of these instructions, so each phrase the spec names is asserted here.
+test('the system-prompt paragraph carries every instruction spec section 11 names', () => {
+  const text = fs.readFileSync(new URL('lib/index.js', root), 'utf8')
+  const start = text.indexOf('name: \'tool:completion-gate\'')
+  assert.notEqual(start, -1, 'the system prompt section is gone')
+  const section = text.slice(start, text.indexOf('}))', start))
+  for (const phrase of ['completion_gate', 'register', 'run it', 'claim or reject every changed file', 'review every changed code file', 'reviewer subagent', 'documentation', 'attest last', 'unrelated', 'runs nothing', 'believes']) {
+    assert.equal(section.toLowerCase().includes(phrase.toLowerCase()), true, `the system prompt paragraph no longer says: ${phrase}`)
+  }
+})

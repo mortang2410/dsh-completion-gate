@@ -182,6 +182,17 @@ test('a premature-stop recovery still files the changed repository for the panel
   assert.equal(response.body.pending, 1)
 })
 
+test('a premature-stop recovery still follows up when the repository report fails', async t => {
+  const svc = statusService(new Map())
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: process.cwd() })
+  emit(svc, a, 'assistant/message', { turn: 1, message: { content: [{ type: 'text', text: 'Now I need to inspect the call site.' }] } })
+  t.mock.method(svc, 'repositoryReport', async () => { throw new Error('EIO: i/o error') })
+  await svc.stopping({ agent: a, turn: 1, signal: new AbortController().signal })
+  assert.equal(a.followups.length, 1, 'the follow-up survives a failed repository report')
+  assert.equal(a.steers.length, 0)
+})
+
 test('empty recovery turn is retried with another bounded follow-up',async()=>{
  const svc=liveService({prematureStopMaxContinuations:3})
  const a=agent()

@@ -22,7 +22,11 @@ function tempFile() {
 // config at fixed indents, and one scalar key per line under config. A key outside that block is ignored.
 function patchConfig(text) {
   const out = {}
+  let inConfig = false
   for (const line of text.split('\n')) {
+    if (/^ {6}config:\s*$/.test(line)) { inConfig = true; continue }
+    if (inConfig && /^ {0,6}\S/.test(line)) { inConfig = false; continue }
+    if (!inConfig) continue
     const match = /^ {8}([A-Za-z][A-Za-z0-9]*):\s*(\S+)\s*$/.exec(line)
     if (!match) continue
     const [, key, raw] = match
@@ -126,6 +130,19 @@ test('the editable keys, defaults, and bundle patch agree', () => {
   assert.deepEqual(patchConfig(patch), defaults, 'the bundle patch carries the surviving defaults')
   assert.doesNotMatch(patch, /verificationNudgeLimit/, 'the bundle patch carries no retired key')
   assert.doesNotMatch(patch, /^\s*mode:/m, 'the bundle patch carries no mode')
+})
+
+test('patchConfig reads only the config block', () => {
+  const text = [
+    '- insert:',
+    '    - id: completion-gate',
+    '      name: dsh-completion-gate',
+    '      config:',
+    '        enabled: true',
+    '      other:',
+    '        stray: 9',
+  ].join('\n')
+  assert.deepEqual(patchConfig(text), { enabled: true }, 'a same-indent key outside the config block is ignored')
 })
 
 test('save and reset round-trip against schema 2', () => {

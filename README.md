@@ -131,7 +131,7 @@ Reopening is bounded by the change source. A path the host record omits cannot r
 
 The gate speaks only when the model tries to end a turn, and at most once per user prompt. It takes the first attempt of the prompt that has something to say and stays silent at every later attempt.
 
-The message covers every repository the session has touched that still has unfinished work. A repository appears with its label and root, the changed files grouped by claim, the code files not yet reviewed, the documentation check when it is missing, every catalog item with its state, and whether the attestation is missing or stale. An item marked unrelated is left out. A repository seen for the first time in this session gets one introduction paragraph that names the repository, points at its catalog, and asks the model to register the verification it will run. The introduction appears once.
+The message covers every repository the session has touched that still has unfinished work. A repository appears with its label and root, the changed files grouped by claim, the code files not yet reviewed, the documentation check when it is missing, every catalog item with its state, and whether the attestation is missing, stale, or current. An item marked unrelated is left out. A repository seen for the first time in this session gets one introduction paragraph that names the repository, points at its catalog, and asks the model to register the verification it will run. The introduction appears once.
 
 The message is delivered with `agent.steer`, which queues one more model step in the same turn before the turn boundary commits. It never blocks a write or a tool call. After that one steer the gate sends no further message until another real user message arrives.
 

@@ -275,6 +275,27 @@ function statusService(summaries,config={}){const listeners=new Map();const tool
 function userPrompt(svc,a,turn){emit(svc,a,'user/message',userMessage(a.id,turn))}
 function announceTurn(svc,a,summaries,turn,cwd,paths){emit(svc,a,'turn/start',{turn});userPrompt(svc,a,turn);const seq=published+1;summaries.set(`${a.id}:${seq}`,{turn,cwd,files:paths.map(p=>({path:p,display:p,added:1,deleted:0})),total:paths.length,added:paths.length,deleted:0});emit(svc,a,'workspace/changes',{turn});return seq}
 
+// A session working in a subdirectory of a repository files a file outside every repository under that working directory,
+// which is no git root. Attesting the root the status prints must claim that file, not resolve it to the repository above.
+test('a file outside every repository is claimable from a session working in a subdirectory', async t => {
+  const repo = tempGitRepo(t)
+  const sub = path.join(repo, 'sub')
+  fs.mkdirSync(sub)
+  const loose = path.join(path.dirname(repo), `loose-${path.basename(repo)}.js`)
+  fs.writeFileSync(loose, 'export const loose = 1\n')
+  t.after(() => fs.rmSync(loose, { force: true }))
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: sub })
+  announceTurn(svc, a, summaries, 1, sub, [loose])
+  const before = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  assert.ok(before.markdown.includes(`Root: ${sub}`), `the status must print the filing root: ${before.markdown}`)
+  await svc.__tool.execute({ action: 'attest', repository_root: sub, claims: [{ path: loose, decision: 'mine' }], reviewed_code_files: [loose] }, { agent: a, signal: new AbortController().signal })
+  const after = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  assert.ok(after.markdown.includes(`- ${loose} (mine, reviewed)`), `the claim must be stored: ${after.markdown}`)
+})
+
 test('status lists every repository the session changed, each with its catalog path and files', async t => {
   const session = tempGitRepo(t)
   const sibling = tempGitRepo(t)

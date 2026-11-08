@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.0
+
+Advisory multi-repository completion tracker. The gate no longer runs verification. It attributes changed files to the repositories that own them, records the model's claims, and reminds the model once per user prompt.
+
+- Resolve every changed file from the host's turn-scoped change record to the nearest repository that owns it, including nested repositories, with the session workspace as the fallback.
+- Keep one in-memory completion ledger per session per repository, with the changed files, their content keys, claim decisions, reviewed states, catalog item states, and one attestation bound to a digest of the changed paths and contents.
+- Add claims of `mine`, `not-mine`, and unclaimed. The gate believes either decision and never audits authorship.
+- Add the per-repository verification catalog at `.dsh/verification.json`, with a required `proves` comment per item and an optional command for reproducibility. Register merges by name and keeps the item id. The catalog is ignored through the repository's local exclude file and is never executed.
+- Add the `passed`, `assumed`, and `unrelated` item states. An assumed item requires a reason and is always reported as a promise, not a pass.
+- Reopen a repository when a recorded path is added or a recorded file's content changes after its attestation, clearing claims, reviews, and item states except an unrelated mark.
+- Send at most one batched advisory message per user prompt, with an introduction for each repository the session sees for the first time. The message advises, never says BLOCKED, and never claims a check failed.
+- Keep the added-line credential scan and report its hits with the rule and count, never the matched text.
+- Keep the Premature Stop Guard and its continuation cap.
+- Add the `register`, `attest`, and `status` tool actions. The `run`, `recipe`, and `temporary_verify` actions and the `/gate-override` command are removed.
+- Reduce the settings to `enabled`, `gateSubagents`, `preventPrematureStops`, `prematureStopMaxContinuations`, `securityScan`, and `maxChangedFiles`. The settings schema becomes version 2.
+- Retire the machine-check runner, check detection, recipes, the recipe runner, the temporary verifier, the verification ledger, custom checks, the acceptance-criteria field, the TODO scan, the mode switch, and the operator override.
+- Rewrite the README, SECURITY.md, and the Completion section of the host AGENTS.md for the advisory workflow.
+- Bump the package version to 0.2.0.
+
 ## 0.1.3
 
 - Fix Premature Stop Guard recovery that could show a context injection and then immediately return the agent to idle.

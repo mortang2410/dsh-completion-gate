@@ -1,411 +1,277 @@
 # dsh-completion-gate
 
-**Completion Gate** is a DeepSeek Harness plugin that prevents a coding agent from successfully ending a changed task until there is evidence that the work is actually ready.
+Completion Gate is a DeepSeek Harness plugin that tracks every file a session changes, resolves each changed file to the repository that owns it, and sends the model one advisory message per user prompt naming the work still unfinished in each repository. It is a reminder, not a check: it executes no test, build, lint, recipe, or probe, and it believes what the model reports about its own work.
 
-It combines two related safeguards:
-
-1. **Premature Stop Guard** — if a model naturally stops while its own latest output clearly says that work is still pending, the plugin schedules a fresh DSH follow-up turn that resumes the unfinished task.
-2. **Production Readiness Gate** — once code has changed, the root agent must produce machine evidence and a structured final review before the turn is allowed to close normally.
-
-The goal is not to make the model *say* that tests passed. The goal is to make DSH execute the available checks, bind the result to the current repository state, and reject stale or incomplete completion evidence.
+The plugin also keeps the Premature Stop Guard, which recovers a natural stop that clearly leaves work pending by scheduling a fresh follow-up turn.
 
 ---
 
 ## Why this plugin exists
 
-LLM coding agents frequently stop in one of these states:
+A session often starts in one folder and works in another. The starting folder may be a scratch directory, the DSH home, or repository A while the real work happens in repository B. A completion gate that resolves one project root from the starting folder verifies the wrong tree in that case: the work in B is invisible or is judged by A's checks.
 
-```text
-"Now I need to inspect the call site..."
-→ tool call
-→ reasoning
-→ model naturally stops
-```
+The earlier design also ran verification itself. It detected test, build, lint, and typecheck commands, executed them, generated temporary probes, and judged completion from their output. That put a plugin in charge of code execution the owner did not ask it to perform.
 
-or:
+The owner decided two things. The model runs verification, not the gate. And the gate believes the model's report of what it ran. What the gate records is a set of completion commitments: which changed files belong to this session, which code files were reviewed, whether changed documentation was checked, and the state of every verification item the session committed to.
 
-```text
-"Implemented. Looks good."
-```
-
-without having actually run the repository's tests, build, lint, typecheck, or reviewed every changed file.
-
-Completion Gate adds a host-side boundary around those failure modes.
-
-```text
-Agent works
-   │
-   ├── model stops while clearly unfinished
-   │       └── Premature Stop Guard → continue
-   │
-   └── model appears genuinely finished
-           │
-           └── Completion Gate
-                  ├── repository changed?
-                  ├── tests
-                  ├── build
-                  ├── lint
-                  ├── typecheck
-                  ├── TODO/FIXME regression scan
-                  ├── security regression tripwires
-                  ├── changed-file review
-                  └── acceptance criteria → evidence
-                           │
-                     PASS ─┴─ BLOCK
-```
+Completion Gate is advisory. It never refuses a write, never blocks a tool call, and never stops a turn from ending. It can waste a reminder when its rules are wrong, and that is the whole cost of a mistake.
 
 ---
 
 ## Core behavior
 
-### 1. Premature Stop Guard
+1. The gate reads the host's turn-scoped change record. The record comes from `@deepseek-ai/dsh-workspace-changes`, which snapshots the working tree at turn start and turn end and diffs the two snapshots.
+2. The scanner resolves every listed path to the repository that owns it.
+3. The gate merges the result into one ledger per session per repository.
+4. When the model tries to end the turn, the gate speaks at most once for that user prompt. The message lists what each repository still owes. A repository with nothing unfinished contributes nothing.
 
-DSH exposes `agent/turn-stopping` when a model has naturally stopped and no tool call or queued continuation is still keeping the turn alive.
+The gate starts no project process. It starts Git only for three jobs: repository discovery, reading a nested repository's HEAD, and appending the catalog's exclude line.
 
-Completion Gate inspects the latest turn for strong evidence that the model itself said work remained, for example:
+### The repository scanner
 
-- `Now I need to inspect...`
-- `Next I will run...`
-- `I still need to...`
-- `Let me trace...`
-- `...and in parallel start the lint run...`
-- reasoning-only output after tool work with no user-facing completion
+For each changed path, the scanner walks up from the file, or from the recorded directory itself, and takes the nearest ancestor that contains a `.git` entry as the owning repository root. A nested repository or submodule is therefore its own repository. A path outside every repository falls back to the session's workspace root, which is also where its catalog lives.
 
-The guard matches a fixed list of pending-work phrases and work verbs. It does not block a first-person subject with any verb, so a first-person sentence whose verb is not on the list passes, for example "I will publish the release notes after review." or "I should check the call site."
+A file is listed once per repository. When a later turn changes the same file again, its one entry is refreshed rather than duplicated. A changed path that is a directory, such as a moved submodule pointer, is treated as a file entry keyed by the nested HEAD.
 
-When detected, the plugin queues a waking `agent.followup()` for a fresh turn such as:
+### Per-session ledger
 
-```text
-PREMATURE STOP RECOVERY:
-Continue the unfinished task.
-Execute the pending investigation or implementation now.
-Do not summarize or claim completion yet.
-```
+All completion state is held per session and in memory. For every repository the session has seen, the gate stores:
 
-The recovery chain is bounded by `prematureStopMaxContinuations`, so repeated premature/empty recovery turns cannot create an infinite follow-up loop.
+- the changed files with their current content keys;
+- each file's claim and reviewed state;
+- the state of each catalog item, including items this session marked unrelated;
+- the attestation, bound to a digest of the changed paths and their content keys;
+- whether the repository was already introduced to the session.
 
-Generic phrases such as `Let me know if you want changes` are not treated as unfinished work.
-
-### 2. Root-agent completion authority
-
-By default:
-
-```yaml
-gateSubagents: false
-```
-
-Only the root agent owns final production readiness. Spawned DSH subagents are allowed to complete their delegated jobs normally.
-
-This is the recommended setting when using autonomous orchestration, Phoenix/model failover, AI Council, critics, or large subagent teams. The root agent remains responsible for integrating the work and passing the final gate.
-
-You can explicitly enable subagent gating from the control center if a project really needs it.
-
-### 3. Turn-scoped changed files
-
-Completion evidence is tied to the turn's own change record, not to a fingerprint of the whole repository.
-
-The changed-file list comes from the host's `@deepseek-ai/dsh-workspace-changes` recorder, which snapshots the working tree at turn start and turn end and diffs the two. That means:
-
-- a file that was already modified before your turn is part of the turn-start baseline and is **not** attributed to you, so unrelated work in the tree no longer blocks you;
-- a file written during the turn by any process inside the repository, including a shell command, **is** attributed to you;
-- gitignored build output is not attributed to you;
-- a file under the system temporary directory counts only when it lies inside the repository.
-
-When a turn changes nothing the recorder announces no summary, which is its normal silence. When the recorder is not mounted at all, or a record cannot be read, the gate reports that the changed files **cannot be determined** rather than assuming the workspace was unchanged.
-
-A missing record is not always an error. Once a turn has ended, a missing record reads as **no host change record for this turn**, and the stop passes on that basis. The host writes no record silently in several cases: when a turn changes nothing, when recording fails, when the turn-start baseline fails, and when the turn has no tool result. The gate cannot tell those cases apart. An explicit `/gate` that runs before any turn has completed, with no record for the turn, reports the change set as **cannot be determined**.
-
-Evidence is keyed by the session, the turn, and a digest of the recorded file list together with each listed file's current contents. A listed directory is a nested repository or submodule. It is keyed by its committed HEAD, not by the files inside it, so an uncommitted edit inside it does not change the key and a new commit does. A directory that is not its own repository root has a fixed key. If a nested HEAD cannot be read, the gate blocks and names that path until the HEAD reads again. The record's sequence number is not part of the key, so a later stop that records the same files with the same contents keeps earlier evidence valid. Editing a listed file, or changing which files are listed, invalidates it. Touching a file without changing its bytes does not, and writing ignored build output does not, because the recorder does not list it.
-
-A turn whose every changed path is documentation or data runs no behavioral check and is not asked for a test command. The added-line TODO and credential scans still read its diff, and you must still attest to every changed file.
-
-### 3a. Verification sources
-
-One inventory decides where verification comes from, and the stop hook, the runner and the tool handler all read that same decision:
-
-| Source | When it applies |
-| --- | --- |
-| Canonical checks | A detected or operator-defined check exists. It always has authority and is never replaced. |
-| Recipe | No canonical check exists, but a recipe can bootstrap, build, test or boot the project. |
-| Temporary verifier | No canonical check and no usable recipe exist, and you ask for the last-resort probe. |
-| None | A documentation-only turn, which needs no behavioral verification. |
-
-A passing verification covers the missing-test-command condition only. It never clears the TODO scan, the credential scan, the changed-file review or the acceptance-criteria attestation, and it never excuses a check that actually failed.
-
-### 3b. The temporary verifier
-
-When nothing else exists, you write a small script and the gate runs it. The path must be absolute, lie under the system temporary directory, sit outside the repository, be a regular file, carry the `dsh-verify-` name prefix and stay under the size cap. The script runs directly with an argument vector and no shell, so an appended `|| true` cannot mask a failure. A path spelled under `/tmp` is also resolved through symlinks, so a link pointing back into the repository is refused.
-
-The gate fingerprints the project before and after the run and rejects the probe when anything differs. The fingerprint covers each file's contents, size, permission bits and modification time, each symlink's target, and the set of directories. Contents are hashed rather than size and time alone, because a rewrite of equal length with the timestamp restored would otherwise be invisible. It refuses the run outright when it cannot complete the comparison: more than 5000 entries, more than 64 MB, a file it cannot read, a directory it cannot list, or an entry it cannot describe. A refusal is a failure, never a silent pass. It kills the probe's whole process group before comparing, so a server or watcher the probe backgrounded cannot write afterwards.
-
-Stated ceilings: the contents of `node_modules`, a virtual environment, `__pycache__` and `.git` are not compared (they are not the code under test, and walking them would breach the entry bound on nearly every Node project), and neither is anything outside the project root. A child that creates its own process group or session escapes the teardown. A script that deliberately restores content, mode, timestamp and link targets together would defeat a before-and-after snapshot, which is beyond what that comparison can prove. A passing script is deleted; a failing one is left on disk so you can repair it. A passing run is recorded as a targeted receipt: the scope label states honestly how much of the project the run exercised, and a fresh passing receipt satisfies the requirement whatever its scope.
-
-### 3c. Verification recipes
-
-For a project with no canonical test command, the gate can detect how to bootstrap, build, test and boot it, then poll a readiness URL and tear the process tree down. Detection covers Node (with the package manager chosen from the lockfile) and the conventional dev-server ports of Next.js, SvelteKit, Astro, Remix, Create React App and Vite, plus Python (Django, FastAPI/Uvicorn, Flask, generic), Go, Rust, Maven, Gradle, Makefile and Docker Compose.
-
-A saved recipe at `.dsh/environment.json` wins over detection and is never rewritten by it. A readiness poll accepts **any** HTTP status, including 404 and 500, because the process answered. A Compose recipe refuses to build or start when a read-only probe cannot rule out running containers for that project.
-
-### 4. Machine evidence
-
-Completion Gate can auto-detect and execute common project checks.
-
-| Ecosystem | Detection / checks |
-| --- | --- |
-| Node.js | package scripts such as `test`, `build`, `lint`, `typecheck` |
-| npm / pnpm / Yarn / Bun | package manager selected from project lockfiles |
-| Python | pytest when tests/config are present; Ruff and Mypy when configured |
-| Go | `go test ./...`, `go vet ./...` |
-| Rust | `cargo test --all-targets`, `cargo check --all-targets` |
-| Composer / PHP | `composer test`, `composer lint` when scripts exist |
-| Any project | operator-defined custom checks |
-
-When `requireTests` is enabled, a project with **no executable test command detected** is reported as a missing harness. That condition alone is covered by a fresh passing verification, whether it came from a recipe or the temporary verifier; a check that actually fails is never covered.
-
-Successful machine results are cached for the turn's change record. A failing result, or one whose diff read had a gap, is not reused by a later stop, so a fix that changes only the environment is seen at the next stop. This avoids rerunning a ten-minute suite merely because the agent needs one extra turn to submit its final review.
-
-### 5. Added-code tripwires
-
-The gate can inspect newly added lines for:
-
-```text
-TODO
-FIXME
-HACK
-XXX
-```
-
-and a deliberately narrow set of obvious security-regression patterns such as:
-
-- likely hard-coded credentials;
-- disabled TLS certificate verification;
-- `eval(...)` / dynamic `Function` construction;
-- `chmod 777`;
-- shell execution enablement requiring review;
-- raw HTML injection surfaces.
-
-This is a **regression tripwire**, not a replacement for dedicated SAST/security tooling.
-
-### 6. Completion attestation
-
-Machine checks cannot prove every requirement. Before final completion, the agent can be required to call the `completion_gate` tool with an attestation bound to the turn's change record.
-
-Example:
-
-```json
-{
-  "action": "attest",
-  "reviewed_files": [
-    "src/engine.ts",
-    "tests/engine.test.ts"
-  ],
-  "review_summary": "Reviewed the complete diff, error paths, state transitions and backwards compatibility.",
-  "acceptance_criteria": [
-    {
-      "criterion": "Risk sizing uses ATR",
-      "evidence": "Unit tests cover ATR-derived risk sizing and the full test suite passes."
-    },
-    {
-      "criterion": "Existing behavior remains compatible",
-      "evidence": "Regression tests and typecheck pass; changed call sites were reviewed."
-    }
-  ],
-  "unresolved_issues": []
-}
-```
-
-In strict mode the gate verifies that:
-
-- every changed file is listed in `reviewed_files`;
-- a changed-file review summary exists;
-- at least one acceptance criterion is supplied;
-- every criterion has concrete evidence;
-- `unresolved_issues` is empty;
-- the attestation still matches the turn's change record.
+A host restart loses all of it. The next session is introduced to each repository again, and the catalog remains on disk. Session disposal forgets the session. Nothing is written to a workspace-level completion file.
 
 ---
 
-## Control Center
+## Claims
 
-Open:
+A changed file starts unclaimed. The model claims it as its own or rejects responsibility for it, and either answer is stored without a check.
 
-**Settings → Completion Gate**
+- `mine` puts the file in this session's completion obligations.
+- `not-mine` removes it from those obligations.
+- unclaimed keeps the file on the list and keeps the gate speaking.
 
-The control center is both a runtime dashboard and a persistent configuration editor.
+Claims are per session. When two sessions change the same file, each session judges it independently.
 
-### Behavior
+Review is a second state on every changed file. Every file starts unreviewed. The attestation marks the code files it lists and the documentation files it covers as reviewed. A rejected file leaves the review obligation with the claim. A claimed code file that stays unreviewed, or a changed documentation file the session has not rejected and not checked, keeps the gate speaking.
 
-- **Enable Completion Gate** — master switch.
-- **Mode**
-  - `Strict`: a failed gate steers the agent back and prevents normal completion.
-  - `Advisory`: evidence is collected, but failure does not force another step.
-- **Gate subagents** — include DSH child/subagent stop boundaries. Off is recommended for autonomous teams.
-- **Premature-stop guard** — recover natural stops that clearly leave pending work by scheduling a fresh follow-up turn.
-- **Max recovery follow-ups** — safety cap across one consecutive premature-stop recovery chain.
+---
 
-### Machine evidence
+## The verification catalog
 
-- **Auto-detect checks**
-- **Require tests**
-- **Require build when available**
-- **Require lint when available**
-- **Require typecheck when available**
-- **Block new TODO/FIXME markers**
-- **Security regression scan**
+Each repository carries a small catalog at `.dsh/verification.json`. It holds the verification items a session committed to run, so a later session can read it, adopt the items that fit, register what it adds, and leave its own comments behind.
 
-### Completion evidence
-
-- **Require final attestation**
-- **Gate only changed workspaces**
-- **Maximum changed files**
-
-### Execution limits
-
-- **Check timeout** — maximum time per individual command.
-- **Stored command output** — maximum sanitized failure output retained per check.
-
-### Custom checks
-
-The UI can add arbitrary operator-defined checks:
-
-```text
-Name: integration-tests
-Category: test
-Command: npm run test:integration
-Required: yes
+```json
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "unit-tests",
+      "name": "Unit tests",
+      "proves": "The scanner resolves paths and the tracker keeps one entry per file.",
+      "command": "npm test",
+      "addedAt": "2026-11-08T04:00:00.000Z",
+      "updatedAt": "2026-11-08T04:00:00.000Z"
+    }
+  ]
+}
 ```
 
-Custom commands execute in the project's workspace on the DSH host. Only configure commands you trust.
+Each item has a name, a required `proves` comment stating what passing it establishes, and an optional command for reproducibility. The `id` is a stable slug derived from the name when the item is created and is kept across updates. Registering an item with an existing name updates its comment and command and keeps its id.
 
-### Saving settings
+The command field is documentation. The gate never runs it.
 
-`Save settings` applies changes immediately and persists them across `dsh web` restarts.
+The catalog is operator-readable knowledge, not execution input. The gate reads it, merges into it, and never executes anything it contains.
 
-Configuration precedence is:
+Before writing a catalog, the gate appends `.dsh/` to that repository's local exclude file once, when Git can resolve one. The tracked `.gitignore` is never edited. A repository without Git gets its catalog and no exclusion.
 
-```text
-built-in defaults
-      ↓
-profile / cordis.patch.yml configuration
-      ↓
-settings saved from the Completion Gate UI
-```
+A catalog that cannot be read is reported and never overwritten. An item is only judged against the catalog the repository holds at that moment.
 
-Whenever gate policy changes, cached machine evidence, attestations, and operator overrides are invalidated. A previous PASS is never reused under a newly changed policy.
+### Item states
 
-`Reset to profile defaults` removes the saved UI overlay and immediately returns to the plugin configuration supplied by the active DSH profile.
+- `passed`: the model ran the item and it passed.
+- `assumed`: the model did not run it and gave a reason. The reason is required. The report always shows an assumed item as a promise, not a pass.
+- `unrelated`: the item does not bear on this session's work. It is left out of the advisory message so it does not nag this session again. The mark survives a reopening, and the status report still lists the item.
+- unstated: the item is unfinished. A failed item is simply not marked passed, so it stays unfinished.
 
-The host-side settings file is intentionally not exposed in the browser UI or gate reports.
+---
+
+## Attestation
+
+One attestation call covers one repository. The model calls the `completion_gate` tool with `action: "attest"` and these fields:
+
+- `repository_root`: the repository to attest. It must be a repository this session has changed, or the session's workspace root.
+- `claims`: one entry per changed file, with `path` and `decision` set to `mine` or `not-mine`.
+- `reviewed_code_files`: the changed code files the session claims as its own and has reviewed.
+- `docs_checked`: true when the session checked every changed documentation file it has not rejected for staleness, bloat, and conflicting information.
+- `items`: one state per catalog item, with `id` and `state` set to `passed`, `assumed`, or `unrelated`. An assumed item also carries a `reason`.
+- `summary`: an optional free-text note.
+
+A claimed file is a code file when its path is not documentation by the extension and basename rule. Every claimed code file must appear in `reviewed_code_files`. Every changed file starts unreviewed, and a file the latest attestation does not cover stays unreviewed.
+
+A malformed call changes nothing and returns the schema error. A well-formed but incomplete call is stored and returns the remaining problems, so the model can correct it and attest again. The gate never verifies the claims, never checks whether a command ran, and never compares the report with tool events.
+
+Attestation is the last action of a turn by instruction. Code that changes after it is handled by reopening, not by asking the model to attest mid-turn.
+
+### Reopening
+
+At every evaluation, the gate refreshes the content key of every changed file it knows in a repository and recomputes the repository digest. When the digest differs from the attested digest, the repository reopens.
+
+A reopening clears every file claim, every reviewed state, and every item state except an item marked unrelated, and it drops the attestation. The model must claim, review, and attest again.
+
+Reopening is bounded by the change source. A path the host record omits cannot reopen anything, which is one of the accepted limits below.
+
+---
+
+## The advisory message
+
+The gate speaks only when the model tries to end a turn, and at most once per user prompt. It takes the first attempt of the prompt that has something to say and stays silent at every later attempt.
+
+The message covers every repository the session has touched that still has unfinished work. A repository appears with its label and root, the files by claim and reviewed state, the code files not yet reviewed, the documentation check when it is missing, every catalog item with its state, and whether the attestation is missing or stale. An item marked unrelated is left out. A repository seen for the first time in this session gets one introduction paragraph that names the repository, points at its catalog, and asks the model to register the verification it will run. The introduction appears once.
+
+The message is delivered with `agent.steer`, which queues one more model step in the same turn before the turn boundary commits. It never blocks a write or a tool call. After that one steer the gate sends no further message in the turn, and the turn closes at a later stop boundary where no new steering is queued.
+
+The message says it is advice and names the next action: read the catalog, register what is missing, claim or reject every file, review every changed code file the session claims, check every changed document it has not rejected, then honestly attest. It never says BLOCKED and never claims a check failed.
+
+A new real user message re-arms the advisory. The gate's own steer, the premature-stop recovery, and a changed change set do not.
+
+### When the change set cannot be determined
+
+The gate reports an undetermined change set, in one short message under the same one-per-prompt rule, when:
+
+- the recorder service is absent;
+- the session is known to be excluded from recording;
+- an announced record cannot be read;
+- the record is truncated;
+- the turn exceeds the changed-file bound.
+
+An ended session the recorder covers with no announcement is read as unchanged and produces no message. The host's silent failure cases stay an accepted false-negative limit.
+
+### Credential hits
+
+When the security scan is enabled, the message also reports added-line credential-pattern hits for the turn. A hit is advice about the diff, not a claim the model can answer. It rides the one message for the prompt, and a hit recorded after that message waits for the next user prompt. Only the rule message is shown, never the matched text. A changed file whose added lines could not be read is named so the scan's gap is visible.
+
+### The Premature Stop Guard
+
+The plugin keeps the Premature Stop Guard. When a model naturally stops while its own latest output says work is pending, the guard schedules a fresh follow-up turn with `agent.followup`. Recovery is bounded by `prematureStopMaxContinuations`, so repeated recovery turns cannot loop forever.
+
+The guard is separate from the advisory. It reads the model's stop text, not changed files, and it never blocks.
+
+---
+
+## Settings
+
+Six settings remain.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `true` | Master switch for repository tracking, premature-stop recovery, and the advisory message. |
+| `gateSubagents` | `false` | Include subagent stop boundaries. Off is recommended because the recorder does not record subagent sessions. |
+| `preventPrematureStops` | `true` | Recover a natural stop that clearly says work is still pending by scheduling a fresh follow-up turn. |
+| `prematureStopMaxContinuations` | `3` | Safety cap across one consecutive premature-stop recovery chain, from 0 to 20. |
+| `securityScan` | `true` | Scan the turn's added lines for high-confidence credential and secret patterns. |
+| `maxChangedFiles` | `500` | Safety bound on the changed-file inventory, from 10 to 5000. A turn over the bound is reported as truncated. |
+
+The saved settings file uses schema version 2. A schema-1 file is ignored and the profile configuration applies until the next save. The settings file path is not returned to the browser.
+
+The machine-check keys, the recipe keys, the temporary-verifier key, the command timeout, the stored-output bound, custom checks, the attestation toggle, and the changed-workspace toggle are gone. The mode selection is gone because the gate is advisory only.
 
 ---
 
 ## Commands
 
-### `/gate`
+### `/gate` and `/gate-status`
 
-Run the gate immediately for the active root session.
-
-```text
-/gate
-```
-
-Useful when you want to inspect readiness before the model tries to finish.
-
-### `/gate-status`
-
-Show the latest report for the active session.
-
-```text
-/gate-status
-```
+Show the session report: every repository this session changed, with each file's claim and reviewed state, the catalog items and their states, the attestation state, and the remaining problems. Neither command starts a check.
 
 ### `/gate-reset`
 
-Discard cached machine evidence, attestation, and operator override for the active session.
+Clears this session's claims, item states, attestations, and premature-stop bookkeeping. No repository, catalog, or file is touched.
 
-```text
-/gate-reset
+### `completion_gate` tool
+
+The tool has three actions.
+
+- `register` writes items into one repository's catalog and returns the catalog path, the item ids, and whether Git will ignore the catalog. It starts no check.
+- `attest` records one repository's claims, reviews, documentation check, and item states, then returns that repository's report. It starts no check.
+- `status` returns the per-repository report for the session. It starts no check and sends no message.
+
+`register` and `attest` both require `repository_root`.
+
+Example attest call:
+
+```json
+{
+  "action": "attest",
+  "repository_root": "/home/wilder/dsh-test/dsh-completion-gate",
+  "claims": [
+    { "path": "README.md", "decision": "mine" },
+    { "path": "lib/index.js", "decision": "mine" }
+  ],
+  "reviewed_code_files": ["lib/index.js"],
+  "docs_checked": true,
+  "items": [
+    { "id": "unit-tests", "state": "passed" },
+    { "id": "manual-smoke", "state": "assumed", "reason": "The CLI has no entry point to smoke test in this environment." }
+  ]
+}
 ```
-
-### `/gate-override <reason>`
-
-Explicit operator override for the **exact current change record**.
-
-```text
-/gate-override accepted temporary compatibility risk
-```
-
-If any file or commit changes afterward, the override no longer applies.
-
-This is intended for the human operator, not as an escape hatch for the agent.
 
 ---
 
-## Agent tool
+## Control Center
 
-The plugin registers:
+Open **Settings → Completion Gate**.
 
-```text
-completion_gate
-```
+The panel edits the six settings and shows the runtime state: one row per session, one block per repository with claim counts, every changed file's claim and reviewed state, catalog item states, and whether the attestation is current, stale, or missing. It also shows the pending repository count.
 
-Actions:
-
-- `run` — execute readiness checks now;
-- `status` — return the latest/current report;
-- `attest` — submit the final changed-file and acceptance-criteria review.
-
-Completion Gate also adds a system-prompt section telling coding agents that the gate is authoritative before they claim completion.
-
----
-
-## Header status
+`Save settings` applies changes immediately and persists them across `dsh web` restarts. `Reset to profile defaults` removes the saved overlay and returns to the active profile's configuration.
 
 The conversation header shows a compact status:
 
 ```text
-Gate · ready
-Gate · 1 blocked
+Gate · 2 pending
 Gate · off
 ```
 
-This is only an operator summary. The authoritative result remains the workspace-bound gate report.
+---
+
+## Important limits
+
+### Accepted limits of the change recorder
+
+The recorder is the source of truth, and it has limits the gate cannot fix.
+
+- A session's snapshot covers the repository that holds its working directory. A file in a sibling repository is listed only when a file tool edits it. A shell edit in a sibling repository is never listed.
+- Ignored paths are listed only when a file tool captures them.
+- A path already dirty at turn start is part of the baseline and is not listed.
+- Nested repositories and submodules are listed as their directory path, so their inner files are unseen. A moved HEAD is seen.
+- A nested repository whose HEAD cannot be read is named at the stop, and attestation for the repository that contains it is refused until its HEAD reads again.
+- A missing record after a turn ends is read as no change. The host also writes no record when recording fails, when the turn-start baseline fails, and when the turn has no tool result. The gate cannot tell those cases apart.
+- A session's record is author-blind. A listed file may have been written by another process or another session. The model's claim or rejection is the attribution, and the gate believes it.
+- A subagent session is not recorded at all. With `gateSubagents` enabled, the child reports an undetermined change set.
+- The gate believes the model, so a false claim is accepted by design.
+- Reopening sees only the paths the recorder lists. A change it omits cannot reopen an attestation.
+- A host restart loses session claims and attestations. The catalog survives in the repository.
+- A turn that changes more files than `maxChangedFiles` is reported as truncated, and the files beyond the bound are not attributed.
+
+These limits are stated here rather than hidden. A wrong limit can cost a reminder; it cannot block a session.
+
+### Recovery uses a fresh turn
+
+The Premature Stop Guard uses `agent.followup`, not `agent.steer`. The follow-up lets the naturally stopped turn close and wakes a new turn with the unfinished-work instruction. The advisory message uses `agent.steer` because it must ride the same turn before its boundary commits.
 
 ---
 
-## Default configuration
+## Interaction with model failover / Phoenix
 
-The bundled profile patch starts with:
+Completion Gate is session scoped, not model scoped. When a provider fails and a replacement model continues the same session, the session's ledger stays as it was: the same changed files, claims, reviews, item states, and attestation.
 
-```yaml
-- insert:
-    - id: completion-gate
-      name: dsh-completion-gate
-      config:
-        enabled: true
-        mode: strict
-        gateSubagents: false
-        preventPrematureStops: true
-        prematureStopMaxContinuations: 3
-        autoDetectChecks: true
-        requireTests: true
-        requireBuildWhenAvailable: true
-        requireLintWhenAvailable: true
-        requireTypecheckWhenAvailable: true
-        blockNewTodos: true
-        securityScan: true
-        requireAttestation: true
-        gateOnlyChangedWorkspaces: true
-        commandTimeoutMs: 600000
-        maxOutputChars: 12000
-        maxChangedFiles: 500
-        autoDetectRecipe: true
-        allowTemporaryVerifier: true
-        recipeReadinessTimeoutMs: 60000
-        customChecks: []
-```
-
-Everything above can be changed from the control center. Profile configuration remains the baseline that `Reset to profile defaults` returns to.
+If the replacement model changes code, the recorded content changes and the repository reopens on the next evaluation, so the attestation cannot cover the old tree. `gateSubagents: false` is recommended with autonomous failover and team orchestration, so child jobs are not asked to report a change set the recorder does not cover.
 
 ---
 
@@ -422,133 +288,25 @@ dsh plugin --profile web add .\dsh-completion-gate
 dsh web
 ```
 
-Then open **Settings → Completion Gate** and review the defaults before relying on strict mode for a production repository.
+Then open **Settings → Completion Gate** and review the defaults.
 
 No dependency installation is required by this plugin.
-
----
 
 ## Updating
 
 Replace the plugin source with the newer source revision and restart `dsh web`.
 
-UI-saved Completion Gate settings are stored separately from the plugin source, so replacing the source directory does not intentionally reset operator preferences. Use **Reset to profile defaults** if you want the new profile defaults instead.
-
----
-
-## Interaction with model failover / Phoenix
-
-Completion Gate is session/workspace scoped, not model scoped.
-
-If a model fails:
-
-```text
-Model A
-  ↓ 429 / timeout / provider failure
-Phoenix / DSH failover
-  ↓
-Model B continues same session
-  ↓
-Completion Gate still owns the same baseline and workspace evidence
-```
-
-A replacement model can continue remediation without restarting the task. If the replacement changes code, the change record changes and stale gate evidence is invalidated naturally.
-
-`gateSubagents: false` is recommended with autonomous failover/team orchestration so child jobs are not unnecessarily blocked by the root production-readiness policy.
-
----
-
-## What happens when the gate blocks
-
-In strict mode DSH receives a steering message similar to:
-
-```text
-COMPLETION GATE BLOCKED. Do not claim completion.
-
-- Node test: test failed.
-- Changed files not reviewed: src/engine.ts
-- Acceptance-criteria evidence is missing.
-
-Fix the failures, review every changed file, then call completion_gate
-with action=attest and concrete acceptance-criteria evidence.
-```
-
-The agent continues from the existing task/workspace state.
-
----
-
-## Important limits
-
-### Premature recovery uses a fresh turn
-
-The Premature Stop Guard intentionally uses `agent.followup()` rather than `agent.steer()`. A follow-up lets the naturally stopped turn close and immediately wakes a new turn with the unfinished-work instruction. This composes better with provider retry/failover and avoids same-turn recovery steps that can visibly inject context and then fall idle.
-
-The actual Production Readiness Gate still uses `agent.steer()` because blocking a failed readiness check must veto the current natural completion boundary.
-
-### DSH records assistant output before the final stop hook
-
-DSH can record an `assistant/message` before `agent/turn-stopping` runs. Therefore Completion Gate can prevent the turn from closing and force another step, but it cannot retroactively erase premature prose already emitted by a non-compliant model.
-
-The Premature Stop Guard and system-prompt instructions are intended to make the normal path continue before the task is treated as complete.
-
-### Tests are only as good as the project
-
-Passing tests do not prove correctness. The gate proves that configured checks passed for a specific turn's change record.
-
-### Attestation is structured model evidence
-
-The gate verifies completeness and freshness of the attestation structure; it cannot mathematically prove that an LLM's semantic review was insightful. Independent review plugins, Council, security tooling, and human review still add value.
-
-### Security scanning is intentionally narrow
-
-The built-in scanner catches obvious newly added risky patterns. It is not a comprehensive vulnerability scanner.
-
-### Custom checks execute shell commands
-
-A custom check is operator-controlled code execution on the DSH host. Treat it with the same care as adding a command to a CI configuration.
-
----
-
-### Accepted limits of the changed-file source
-
-- **A missing record is not proof of no change.** After a turn ends, the gate reads a missing host record as no changes. The host writes no record when a turn changes nothing, and also when recording fails, when the turn-start baseline fails, or when the turn has no tool result, so a changed file can be missed in those cases. The gate cannot tell these apart (`@deepseek-ai/dsh-workspace-changes`, `lib/index.js` lines 844 and 896; `lib/changes.js` `readTurnChanges`).
-- **A text-only turn is not inspected.** A turn with no tool call produces no host record, so a file written outside the tools in that turn is not listed. The gate names such a turn "text-only turn, not inspected" in its report, which needs the session's own tool-call events (`lib/index.js` `turnChanges`, the `textOnly` check).
-- **A nested edit that leaves its HEAD unchanged is invisible.** The host leaves files inside a nested repository out of its listing, so an uncommitted edit inside one is never listed and never changes the key. Only a moved HEAD is seen (`@deepseek-ai/dsh-workspace-changes`, `lib/index.js` lines 884 and 885, with gitlink paths from line 405). The gate does not scan nested repositories itself.
-- **A non-forced check can pass with no record (ACCEPT-H3).** Before any turn of the session has started, a non-forced check (`/gate-status`, or `completion_gate` with action `status`) with no record for the turn reads the change set as none and passes. A turn that has ended with no record is also read as none. An open turn with no record is undetermined for a non-forced check and an explicit `/gate`, but the stop-time check passes it. An explicit `/gate` with no record before any completed turn is undetermined.
-- **After a host restart, an explicit `/gate` is undetermined until one turn completes (ACCEPT-H4).** The gate keeps its turn record in memory, and the host does not publish a session's earlier events to the gate's hook. After a restart, an explicit `/gate`, `completion_gate` run, recipe or temporary verifier run reports the change set as undetermined until one new turn completes, even when earlier turns completed. The stop check still works for each new turn. A non-forced check after a restart, before the next turn starts, reads no changes and passes. The premature-stop guard and the text-only check read only the turn events published after the gate started, so a turn that began before a restart is judged on its later events alone. A turn that began before a restart, whose only output is reasoning with no tool call seen by the gate, is not judged and passes. For example, the reasoning "Now I need to inspect the call site." passes (`lib/index.js:132`).
-- **Reasoning is not read when the final message has text (ACCEPT-H5).** After tool work, reasoning such as "Now I need to inspect the call site." followed by final text "Here is the status so far." passes, because the guard judges only the text. The Premature Stop Guard section describes this case as "reasoning-only output after tool work with no user-facing completion". The code passes a wider set of turns than that description: it reads reasoning only when the final message has no text at all, so a final message that is text but not a completion, such as a status line, passes even when the reasoning is pending (`lib/index.js:132`).
-- **An in-parallel action passes or blocks by word order (ACCEPT-H6).** "Start the lint run in parallel with the tests." passes. "The fix is in place, and in parallel start the lint run." blocks. The guard reads "in parallel" only when a work verb comes directly after it (`lib/index.js`, `FUTURE_INTENT`), so the same action passes in one word order and blocks in the other. This is accepted as a limit, and the code is not changed for it.
-## Recommended configuration for an autonomous developer team
-
-```yaml
-enabled: true
-mode: strict
-gateSubagents: false
-preventPrematureStops: true
-prematureStopMaxContinuations: 3
-autoDetectChecks: true
-requireTests: true
-requireBuildWhenAvailable: true
-requireLintWhenAvailable: true
-requireTypecheckWhenAvailable: true
-blockNewTodos: true
-securityScan: true
-requireAttestation: true
-gateOnlyChangedWorkspaces: true
-```
-
-This leaves implementation freedom to subagents and model failover while keeping one hard readiness boundary at the root agent.
+UI-saved settings are stored separately from the plugin source, so replacing the source directory does not reset operator preferences. Use **Reset to profile defaults** when you want the new profile defaults instead.
 
 ---
 
 ## Privacy and security
 
-- Gate reports expose the repository/workspace **basename**, not the absolute local filesystem path.
-- Captured command output is sanitized before it is retained or displayed.
-- Common credential/token patterns and absolute local paths are redacted from stored failure output.
-- Browser settings endpoints require same-origin requests.
-- UI-saved settings are persisted host-side; the persistence path itself is not sent to the browser.
-- The model cannot add custom check commands through the `completion_gate` attestation tool.
+- The settings API accepts same-origin browser requests only.
+- UI-saved settings are persisted host-side, and the persistence path is not returned to the browser.
+- Reports name repository roots and changed file paths because the model needs them to do the work.
+- Credential hits name the rule and the count, never the matched text.
+- The catalog is a knowledge file, not an execution input.
 
 See [SECURITY.md](SECURITY.md) for the concise security model.
 

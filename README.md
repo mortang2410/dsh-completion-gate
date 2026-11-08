@@ -305,7 +305,7 @@ UI-saved settings are stored separately from the plugin source, so replacing the
 - The settings API accepts same-origin browser requests only.
 - UI-saved settings are persisted host-side, and the persistence path is not returned to the browser.
 - Reports name repository roots and changed file paths because the model needs them to do the work.
-- Credential hits name the rule and the count, never the matched text.
+- Security-scan hits name the rule and the count, never the matched text.
 - The catalog is a knowledge file, not an execution input.
 
 See [SECURITY.md](SECURITY.md) for the concise security model.

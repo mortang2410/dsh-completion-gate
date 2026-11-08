@@ -243,6 +243,27 @@ test('register writes into a sibling subdirectory that a symlink points at, neve
   assert.equal(excludeLines(session).includes('.dsh/'), false, 'the workspace exclude file is unchanged')
 })
 
+// A session working in a subdirectory files a change outside every repository under that directory, and the status tells
+// the model to register there. Register then writes the catalog inside the subdirectory, so the exclude line must go into
+// the enclosing repository's exclude file, or the catalog shows up as an untracked file in the user's checkout.
+test('register in a subdirectory of a repository excludes its catalog in that repository', async t => {
+  const repo = gitRepo('subdir-')
+  const sub = path.join(repo, 'sub')
+  fs.mkdirSync(sub)
+  const loose = path.join(path.dirname(repo), `loose-${path.basename(repo)}.js`)
+  fs.writeFileSync(loose, 'export const loose = 1\n')
+  t.after(() => fs.rmSync(loose, { force: true }))
+  const summaries = new Map()
+  const svc = gateFor(t, summaries)
+  const a = agentIn(sub)
+  announceTurn(svc, a, summaries, 1, sub, [loose])
+  const out = await register(svc, a, sub, [{ name: 'Subdir smoke', proves: 'The catalog stays out of git.' }])
+  assert.match(out.markdown, /Exclusion: \.dsh\/ was (added to|already listed in) .*\.git\/info\/exclude, so git ignores the catalog\./, out.markdown)
+  assert.ok(fs.existsSync(path.join(sub, '.dsh', 'verification.json')), 'the catalog is written under the working directory')
+  execFileSync('git', ['check-ignore', '-q', 'sub/.dsh/verification.json'], { cwd: repo })
+  assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' }).trim(), '', 'the enclosing repository stays clean')
+})
+
 test('register keeps the item text as entered, and the register and status reports still show each item on one line', async t => {
   const repo = gitRepo()
   const svc = gateFor(t)

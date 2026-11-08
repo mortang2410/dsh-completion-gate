@@ -51,14 +51,29 @@ test('README is complete enough for a new operator', () => {
   assert.doesNotMatch(text, /packaged \.tgz|npm package|install the packaged/i)
 })
 
-// Spec section 11 fixes what the model reads at the start of every session. A retitled or trimmed paragraph would
-// silently drop one of these instructions, so each phrase the spec names is asserted here.
+// Spec section 11 fixes what the model reads at the start of every session. Each instruction is asserted as the whole
+// clause the spec names, including its modifiers, so trimming a qualifier such as "yourself" or "you claim" fails here.
+// The guard clause at the end is a control: it must be absent, which proves a missing clause is reported rather than
+// matching some other part of the paragraph.
 test('the system-prompt paragraph carries every instruction spec section 11 names', () => {
   const text = fs.readFileSync(new URL('lib/index.js', root), 'utf8')
   const start = text.indexOf('name: \'tool:completion-gate\'')
   assert.notEqual(start, -1, 'the system prompt section is gone')
-  const section = text.slice(start, text.indexOf('}))', start))
-  for (const phrase of ['completion_gate', 'register', 'run it', 'claim or reject every changed file', 'review every changed code file', 'reviewer subagent', 'documentation', 'attest last', 'unrelated', 'runs nothing', 'believes']) {
-    assert.equal(section.toLowerCase().includes(phrase.toLowerCase()), true, `the system prompt paragraph no longer says: ${phrase}`)
-  }
+  // The section ends at the closing parenthesis of its own line; `}))` also appears in earlier template literals.
+  const section = text.slice(start, text.indexOf('\n    }))', start))
+  assert.ok(section.length > 500, `the section slice is too short to hold the paragraph: ${section.length}`)
+  // The source escapes the apostrophe inside its single-quoted literal, so the literal below carries that backslash.
+  const clauses = [
+    'For code-changing tasks, Completion Gate tracks every repository you change',
+    'Register the verification you commit to in each changed repository\\\'s .dsh/verification.json catalog',
+    'run it yourself',
+    'claim or reject every changed file',
+    'review every changed code file you claim (a separate reviewer subagent is the recommended pattern)',
+    'check the changed documentation you have not rejected for staleness, bloat, and conflicting information',
+    'Then attest last with completion_gate action=attest',
+    'mark a catalog item unrelated when it does not concern this session, so it is not reported again',
+    'The gate runs nothing and believes you',
+  ]
+  for (const clause of clauses) assert.equal(section.includes(clause), true, `the system prompt paragraph no longer says: ${clause}`)
+  assert.equal(section.includes('believes nothing'), false, 'control: the refusal clause must stay absent')
 })

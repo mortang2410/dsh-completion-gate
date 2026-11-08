@@ -296,6 +296,20 @@ test('a file outside every repository is claimable from a session working in a s
   assert.ok(after.markdown.includes(`- ${loose} (mine, reviewed)`), `the claim must be stored: ${after.markdown}`)
 })
 
+// A session loaded partway through cannot tell an earlier turn that ended before it loaded from one still open, so the
+// "not written yet" notice belongs to the latest turn only. An earlier turn is named only for a failure it can read.
+test('the open-turn notice is reported for the latest turn only, never for turns that ended before the gate loaded', async t => {
+  const repo = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: repo })
+  for (let turn = 1; turn <= 3; turn += 1) emit(svc, a, 'turn/start', { turn })
+  const status = await svc.__tool.execute({ action: 'status' }, { agent: a, signal: new AbortController().signal })
+  const notices = status.markdown.split('\n').filter(line => line.startsWith('Notice:') && line.includes('has not been written yet'))
+  assert.deepEqual(notices.map(line => line.match(/turn (\d+)/)[1]), ['3'], status.markdown)
+})
+
 test('status lists every repository the session changed, each with its catalog path and files', async t => {
   const session = tempGitRepo(t)
   const sibling = tempGitRepo(t)

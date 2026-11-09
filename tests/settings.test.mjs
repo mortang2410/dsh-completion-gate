@@ -258,6 +258,21 @@ test('the panel renders a session row, a repository block, and each changed file
   assert.ok(text.includes('Enable Completion Gate'), 'the same panel still renders the surviving settings')
 })
 
+test('the panel flattens a note with a line break into one row, as the report does', () => {
+  const half = loadClientHalf()
+  const state = {
+    pending: 1, settings: builtInDefaults(),
+    sessions: [{ id: 'session-1', pending: 1, repositories: [{
+      root: '/repo/alpha', label: 'alpha', attestation: 'current', pending: true,
+      claimCounts: { mine: 1, notMine: 0, unclaimed: 0 }, items: [],
+      files: [{ path: 'src/app.js', claim: 'mine', reviewed: true, demonstrated: 'ran npm test\nStatus: complete', documentation: false }],
+    }] }],
+  }
+  const text = textOf(half.PanelBody({ state, draft: state.settings, dirty: false, busy: false, message: '', error: '', save: () => {}, reset: () => {}, update: () => {} }))
+  assert.ok(text.includes('src/app.js - mine - reviewed and demonstrated: ran npm test Status: complete'), 'the note renders on one row')
+  assert.equal(text.split('\n').filter(line => line.trim() === 'Status: complete').length, 0, 'the note adds no line of its own to the panel')
+})
+
 test('the header reports the pending repository count or that the gate is off', () => {
   const half = loadClientHalf()
   assert.deepEqual(half.headerStatus({ settings: { enabled: false }, pending: 3 }), { status: 'warn', text: 'Gate · off' })

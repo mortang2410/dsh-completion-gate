@@ -420,7 +420,7 @@ test('a staged call after a nested repository appears leaves a file under the ne
   const attested = await svc.__tool.execute(attestArgs(session, { claims: [{ path: 'pkg/source.js', decision: 'mine' }], reviewed_code_files: ['pkg/source.js'], demonstrated_files: [{ path: 'pkg/source.js', note: 'ran the fixture' }], items: [] }), execOf(a))
   assert.equal(attested.pass, true, attested.markdown)
   await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Outer', proves: 'source.js sets value' }] }, execOf(a))
-  assert.ok((await linesOf(svc, a)).includes(`- ${file} (mine, reviewed and demonstrated: ran the fixture)`), 'a staged register keeps the reviewed state the attestation stored')
+  assert.ok((await linesOf(svc, a)).includes(`- ${file} (mine, reviewed and demonstrated: ran the fixture)`), 'a staged register keeps the reviewed and demonstrated state the attestation stored')
   execFileSync('git', ['init', '-q', '.'], { cwd: nested })
   await svc.__tool.execute({ action: 'register', repository_root: nested, items: [{ name: 'Unit', proves: 'source.js sets value' }] }, execOf(a))
   assert.ok((await linesOf(svc, a)).includes(`- ${file} (mine, unreviewed)`), 'the staged move leaves the file unreviewed under its new root')
@@ -446,7 +446,7 @@ test('a staged call with an unavailable turn record moves the file through reroo
   svc.repositories.session(a.id).repos.get(session).files.get(file).claim = 'mine'
   const attested = await svc.__tool.execute(attestArgs(session, { claims: [{ path: 'pkg/source.js', decision: 'mine' }], reviewed_code_files: ['pkg/source.js'], demonstrated_files: [{ path: 'pkg/source.js', note: 'ran the fixture' }], items: [] }), execOf(a))
   assert.equal(attested.pass, true, attested.markdown)
-  assert.ok((await linesOf(svc, a)).includes(`- ${file} (mine, reviewed and demonstrated: ran the fixture)`), 'precondition: the file is reviewed under the outer root')
+  assert.ok((await linesOf(svc, a)).includes(`- ${file} (mine, reviewed and demonstrated: ran the fixture)`), 'precondition: the file is reviewed and demonstrated under the outer root')
   summaries.delete(`${a.id}:${seq}`)
   execFileSync('git', ['init', '-q', '.'], { cwd: nested })
   await svc.__tool.execute({ action: 'register', repository_root: nested, items: [{ name: 'Unit', proves: 'source.js sets value' }] }, execOf(a))
@@ -876,7 +876,7 @@ test('an outer repository whose only changed file moves into a nested repository
   const outer = lines.slice(outerAt, next === -1 ? lines.length : next)
   assert.ok(outer.includes('Status: complete'), `the emptied outer repository is not unfinished:\n${outer.join('\n')}`)
   assert.ok(lines.includes(`- ${file} (mine, unreviewed)`), 'the nested repository keeps the mine claim, and the move leaves the file unreviewed there')
-  assert.ok(lines.includes(`Notice: Repository ${session} changed after its attestation, so its claims and item states were cleared and the attestation was dropped.`), 'a reopen with no unrelated mark keeps the wording it always had')
+  assert.ok(lines.includes(`Notice: Repository ${session} changed after its attestation, so its claims, reviews, demonstrations and item states were cleared and the attestation was dropped.`), 'a reopen with no unrelated mark keeps the wording it always had')
 })
 
 test('an emptied outer repository that still has catalog items keeps its missing attestation as a problem', async t => {

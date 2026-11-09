@@ -276,7 +276,7 @@ test('a reopen keeps the unrelated mark while the passed and assumed states are 
 
   fs.writeFileSync(path.join(session, 'app.js'), 'const value = 2\n')
   const lines = await linesOf(svc, a)
-  assert.ok(lines.includes(`Notice: Repository ${session} changed after its attestation, so its claims and item states were cleared except those marked unrelated, and the attestation was dropped.`), 'the reopen notice names the cleared states and the exception it kept')
+  assert.ok(lines.includes(`Notice: Repository ${session} changed after its attestation, so its claims, reviews, demonstrations and item states were cleared except the items marked unrelated, and the attestation was dropped.`), 'the reopen notice names the cleared states and the exception it kept')
   assert.ok(lines.includes('- unit: Unit | not stated'), 'the passed state is cleared by the reopen')
   assert.ok(lines.includes('- browser: Browser | not stated'), 'the assumed state is cleared by the reopen')
   assert.ok(lines.includes('- audit: Audit | unrelated to this session'), 'the unrelated mark survives the reopen')
@@ -396,7 +396,7 @@ test('attest refuses a changed file that cannot be read, stores nothing, and acc
 
 // The demonstrated state, above reviewed. A review is a reading, so the gate treats a claimed file the session has read
 // but never run as unfinished, and it says so in the words a model can act on.
-const UNDEMONSTRATED = app => `Claimed files reviewed but not demonstrated: ${app}. A review is only a reading, so run the change where it is used, then attest with demonstrated_files listing each path and what the run showed.`
+const UNDEMONSTRATED = app => `Claimed files reviewed but not demonstrated: ${app}. A review is only a reading, so show the change working in the place it serves, then attest with demonstrated_files listing each path with the command it ran and that command's output.`
 
 test('a reviewed file with no run stays unfinished and is named as not demonstrated', async t => {
   const { session, svc, a } = await attestFixture(t)
@@ -415,7 +415,7 @@ test('a reviewed file with no run stays unfinished and is named as not demonstra
   assert.ok((await linesOf(svc, a)).includes(`- ${app} (mine, reviewed and demonstrated: ran the fixture)`), 'the run that demonstrated the file is reported with the file')
 })
 
-test('the advisory names the reviewed but undemonstrated files and tells the model to exercise the change', async t => {
+test('the advisory names the reviewed but undemonstrated files and tells the model to show the change working', async t => {
   const { session, svc, a } = await attestFixture(t)
   const app = path.join(session, 'app.js')
   await svc.__tool.execute(attestArgs(session, {
@@ -433,8 +433,8 @@ test('attest refuses a demonstration with no note, a path that is not a changed 
   const before = JSON.stringify(await svc.repositoryReport(a))
   const claim = { claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'] }
   const refusals = [
-    [attestArgs(session, { ...claim, demonstrated_files: [{ path: 'app.js', note: '   ' }] }), new RegExp(`^attest refused\\. Nothing was changed\\.\\n- app\\.js is demonstrated with no note\\.`)],
-    [attestArgs(session, { ...claim, demonstrated_files: [{ path: 'app.js' }] }), /app\.js is demonstrated with no note\./],
+    [attestArgs(session, { ...claim, demonstrated_files: [{ path: 'app.js', note: '   ' }] }), /demonstrated_files\[0\]\.note is required: say what you ran/],
+    [attestArgs(session, { ...claim, demonstrated_files: [{ path: 'app.js' }] }), /demonstrated_files\[0\]\.note is required: say what you ran/],
     [attestArgs(session, { ...claim, demonstrated_files: [{ path: 'missing.js', note: 'ran it' }] }), /missing\.js is not a changed file of this repository\./],
     [attestArgs(session, { ...claim, demonstrated_files: [{ path: 'app.js', note: 'a' }, { path: 'app.js', note: 'b' }] }), /demonstrated_files\[1\]\.path repeats app\.js\./],
     [attestArgs(session, { ...claim, demonstrated_files: [{ path: 'app.js', note: 'ran it', command: 'npm test' }] }), /demonstrated_files\[0\] has an unknown key: command\./],

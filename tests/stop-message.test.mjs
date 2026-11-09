@@ -282,7 +282,7 @@ test('the message lists reviewed files that were never demonstrated and says a r
   await stop(svc, agent)
   assert.equal(agent.steers.length, 1)
   const lines = steerText(agent.steers[0]).split('\n')
-  const at = lines.indexOf('Reviewed as a reading but not demonstrated yet (a review is not a run; exercise the change where it is used):')
+  const at = lines.indexOf('Reviewed as a reading but not demonstrated yet (a review is not a run; show the change working in the place it serves):')
   assert.ok(at >= 0, `the message must name the reviewed but undemonstrated files: ${lines.join('\n')}`)
   assert.equal(lines[at + 1], `- ${path.join(repo, 'app.js')}`, 'the reviewed file must be listed under that heading')
 })

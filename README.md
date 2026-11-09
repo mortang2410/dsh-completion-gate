@@ -218,7 +218,7 @@ Example attest call:
   "reviewed_code_files": ["lib/index.js"],
   "demonstrated_files": [
     { "path": "lib/index.js", "note": "Ran the suite and the panel in a fresh session; both showed the new state." },
-    { "path": "README.md", "note": "Read the rendered page against the live panel." }
+    { "path": "README.md", "note": "Ran the documented command; it printed the new field." }
   ],
   "docs_checked": true,
   "items": [

@@ -745,7 +745,7 @@ test('a later attest that names only items replaces the reviewed list and docs c
   const { session, svc, a } = await attestFixture(t, ['app.js', 'other.js', 'NOTES.md'])
   const first = await svc.__tool.execute(attestArgs(session, {
     claims: [{ path: 'app.js', decision: 'mine' }, { path: 'other.js', decision: 'not-mine' }, { path: 'NOTES.md', decision: 'mine' }],
-    reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }, { path: 'NOTES.md', note: 'read the rendered page' }], docs_checked: true, items: [{ id: 'unit', state: 'passed' }],
+    reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }, { path: 'NOTES.md', note: 'ran the documented command; it printed the new field' }], docs_checked: true, items: [{ id: 'unit', state: 'passed' }],
   }), execOf(a))
   assert.equal(first.pass, true, first.markdown)
   const second = await svc.__tool.execute(attestArgs(session, { items: [{ id: 'unit', state: 'assumed', reason: 'x' }] }), execOf(a))
@@ -791,7 +791,7 @@ test('a register that overlaps an attest on one session keeps the claim the atte
 test('a changed documentation file is a problem until docs_checked is true', async t => {
   const { session, svc, a } = await attestFixture(t, ['app.js', 'README.md'])
   const readme = path.join(session, 'README.md')
-  const claims = { claims: [{ path: 'app.js', decision: 'mine' }, { path: 'README.md', decision: 'mine' }], reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }, { path: 'README.md', note: 'read the rendered page' }], items: [{ id: 'unit', state: 'passed' }] }
+  const claims = { claims: [{ path: 'app.js', decision: 'mine' }, { path: 'README.md', decision: 'mine' }], reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }, { path: 'README.md', note: 'ran the documented command; it printed the new field' }], items: [{ id: 'unit', state: 'passed' }] }
   const unchecked = await svc.__tool.execute(attestArgs(session, { ...claims, docs_checked: false }), execOf(a))
   assert.ok(unchecked.blockers.some(p => p.startsWith('Changed documentation not checked:') && p.includes(readme)), unchecked.markdown)
   const checked = await svc.__tool.execute(attestArgs(session, { ...claims, docs_checked: true }), execOf(a))

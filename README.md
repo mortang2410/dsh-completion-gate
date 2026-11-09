@@ -12,7 +12,7 @@ A session often starts in one folder and works in another. The starting folder m
 
 The earlier design also ran verification itself. It detected test, build, lint, and typecheck commands, executed them, generated temporary probes, and judged completion from their output. That put a plugin in charge of code execution the owner did not ask it to perform.
 
-The operator decided two things. The model runs verification, not the gate. And the gate believes the model's report of what it ran. What the gate records is a set of completion commitments: which changed files belong to this session, which code files were reviewed, whether changed documentation was checked, and the state of every verification item the session committed to.
+The operator decided two things. The model runs verification, not the gate. And the gate believes the model's report of what it ran. What the gate records is a set of completion commitments: which changed files belong to this session, which code files were reviewed, which changed files were demonstrated in real use, whether changed documentation was checked, and the state of every verification item the session committed to.
 
 Completion Gate is advisory. It never refuses a write, never blocks a tool call, and never stops a turn from ending. It can waste a reminder when its rules are wrong, and that is the whole cost of a mistake.
 
@@ -38,7 +38,7 @@ A file is listed once per repository. When a later turn changes the same file ag
 All completion state is held per session and in memory. For every repository the session has seen, the gate stores:
 
 - the changed files with their current content keys;
-- each file's claim and reviewed state;
+- each file's claim, reviewed state, and demonstrated state;
 - the state of each catalog item, including items this session marked unrelated;
 - the attestation, bound to a digest of the changed paths and their content keys;
 - whether the repository was already introduced to the session.
@@ -58,6 +58,8 @@ A changed file starts unclaimed. The model claims it as its own or rejects respo
 Claims are per session. When two sessions change the same file, each session judges it independently.
 
 Review is a second state on every changed file. Every file starts unreviewed. The attestation marks the code files it lists and the documentation files it covers as reviewed. A rejected file leaves the review obligation with the claim. A claimed code file that stays unreviewed, or a changed documentation file the session has not rejected and not checked, keeps the gate speaking.
+
+Demonstration is the state above review. A review is only a reading, so a claimed file that was reviewed and has no run behind it is unfinished too: the gate asks for the change to be exercised where it is used, and names the file as reviewed but not demonstrated. A demonstration is recorded in `demonstrated_files` as the path plus a note of what was run, where it ran, and what it showed, and the note is printed with the file. A demonstration without a note is refused, and a file listed there that the same attestation does not also cover as reviewed stays undemonstrated, because a run of code nobody read is not evidence about the code a reviewer read. The strongest state a file reaches is "reviewed and demonstrated", and the panel and the report show that note beside the file.
 
 ---
 
@@ -108,10 +110,11 @@ One attestation call covers one repository. The model calls the `completion_gate
 - `claims`: one entry per changed file, with `path` and `decision` set to `mine` or `not-mine`.
 - `reviewed_code_files`: the changed code files the session claims as its own and has reviewed.
 - `docs_checked`: true when the session checked every changed documentation file it has not rejected for staleness, bloat, and conflicting information.
+- `demonstrated_files`: one entry per changed file the session demonstrated in real use, with `path` and a `note` of what was run, where it ran, and what it showed. An empty note is refused.
 - `items`: one state per catalog item, with `id` and `state` set to `passed`, `assumed`, or `unrelated`. An assumed item also carries a `reason`.
 - `summary`: an optional free-text note.
 
-A claimed file is a code file when its path is not documentation by the extension and basename rule. Every claimed code file must appear in `reviewed_code_files`. Every changed file starts unreviewed, and a file the latest attestation does not cover stays unreviewed.
+A claimed file is a code file when its path is not documentation by the extension and basename rule. Every claimed code file must appear in `reviewed_code_files`. Every claimed file that is reviewed must also appear in `demonstrated_files`, documentation files included, because the change must be proven in use and not only read. Every changed file starts unreviewed and undemonstrated, a file the latest attestation does not cover stays unreviewed, and a file whose run that attestation does not repeat stays undemonstrated.
 
 A malformed call changes nothing and returns the schema error. A call the gate refuses changes nothing either and says why: a path that is not a changed file, an item id that is not in the catalog, a changed file it cannot read, or a nested repository with no readable HEAD. A well-formed call that leaves work undone is stored and returns the remaining problems, so the model can correct it and attest again. The gate never verifies the claims, never checks whether a command ran, and never compares the report with tool events.
 
@@ -121,7 +124,7 @@ Attestation is the last action of a turn by instruction. Code that changes after
 
 At every evaluation, the gate refreshes the content key of every changed file it knows in a repository and recomputes the repository digest. When the digest differs from the attested digest, the repository reopens.
 
-A reopening clears every file claim, every reviewed state, and every item state except an item marked unrelated, and it drops the attestation. The model must claim, review, and attest again.
+A reopening clears every file claim, every reviewed state, every demonstrated state, and every item state except an item marked unrelated, and it drops the attestation. The report then says the attestation is stale, and the model must claim, review, demonstrate, and attest again.
 
 Reopening is bounded by the change source. A path the host record omits cannot reopen anything, which is one of the accepted limits below.
 
@@ -131,11 +134,11 @@ Reopening is bounded by the change source. A path the host record omits cannot r
 
 The gate speaks only when the model tries to end a turn, and at most once per user prompt. It takes the first attempt of the prompt that has something to say and stays silent at every later attempt.
 
-The message covers every repository the session has touched that still has unfinished work. A repository appears with its label and root, the changed files grouped by claim, the code files not yet reviewed, the documentation check when it is missing, every catalog item with its state, and whether the attestation is missing, stale, or current. An item marked unrelated is left out. A repository seen for the first time in this session gets one introduction paragraph that names the repository, points at its catalog, and asks the model to register the verification it will run. The introduction appears once.
+The message covers every repository the session has touched that still has unfinished work. A repository appears with its label and root, the changed files grouped by claim, the code files not yet reviewed, the reviewed files not yet demonstrated, the documentation check when it is missing, every catalog item with its state, and whether the attestation is missing, stale, or current. An item marked unrelated is left out. A repository seen for the first time in this session gets one introduction paragraph that names the repository, points at its catalog, and asks the model to register the verification it will run. The introduction appears once.
 
 The message is delivered with `agent.steer`, which queues one more model step in the same turn before the turn boundary commits. It never blocks a write or a tool call. After that one steer the gate sends no further message until another real user message arrives.
 
-The message says it is advice and names the next action: read the catalog, register what is missing, claim or reject every file, review every changed code file the session claims, check every changed document it has not rejected, then honestly attest. It never says BLOCKED and never claims a check failed.
+The message says it is advice and names the next action: read the catalog, register what is missing, claim or reject every file, review every changed code file the session claims, check every changed document it has not rejected, demonstrate the change in real use, then honestly attest. It never says BLOCKED and never claims a check failed.
 
 A new real user message re-arms the advisory. The gate's own steer, the premature-stop recovery, and a changed change set do not.
 
@@ -186,7 +189,7 @@ The machine-check keys, the recipe keys, the temporary-verifier key, the command
 
 ### `/gate` and `/gate-status`
 
-Show the session report: every repository this session changed, with each file's claim and reviewed state, the catalog items and their states, the attestation state, and the remaining problems. Neither command starts a check.
+Show the session report: every repository this session changed, with each file's claim and reviewed and demonstrated state, the catalog items and their states, the attestation state, and the remaining problems. Neither command starts a check.
 
 ### `/gate-reset`
 
@@ -197,7 +200,7 @@ Clears this session's claims, item states, attestations, and premature-stop book
 The tool has three actions.
 
 - `register` writes items into one repository's catalog and returns the catalog path, the item ids, and whether Git will ignore the catalog. It starts no check.
-- `attest` records one repository's claims, reviews, documentation check, and item states, then returns that repository's report. It starts no check.
+- `attest` records one repository's claims, reviews, demonstrations, documentation check, and item states, then returns that repository's report. It starts no check.
 - `status` returns the per-repository report for the session. It starts no check and sends no message.
 
 `register` and `attest` both require `repository_root`.
@@ -213,6 +216,10 @@ Example attest call:
     { "path": "lib/index.js", "decision": "mine" }
   ],
   "reviewed_code_files": ["lib/index.js"],
+  "demonstrated_files": [
+    { "path": "lib/index.js", "note": "Ran the suite and the panel in a fresh session; both showed the new state." },
+    { "path": "README.md", "note": "Read the rendered page against the live panel." }
+  ],
   "docs_checked": true,
   "items": [
     { "id": "unit-tests", "state": "passed" },
@@ -227,7 +234,7 @@ Example attest call:
 
 Open **Settings → Completion Gate**.
 
-The panel edits the six settings and shows the runtime state: one row per session, one block per repository with claim counts, every changed file's claim and reviewed state, catalog item states, and whether the attestation is current, stale, or missing. It also shows the pending repository count.
+The panel edits the six settings and shows the runtime state: one row per session, one block per repository with claim counts, every changed file's claim with its reviewed and demonstrated state, catalog item states, and whether the attestation is current, stale, or missing. It also shows the pending repository count.
 
 `Save settings` applies changes immediately and persists them across `dsh web` restarts. `Reset to profile defaults` removes the saved overlay and returns to the active profile's configuration.
 

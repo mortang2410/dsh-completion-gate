@@ -169,7 +169,7 @@ test('a fully attested repository with no unfinished work produces no steer', as
   const result = await svc.attest(agent, {
     repository_root: repo,
     claims: [{ path: 'app.js', decision: 'mine' }],
-    reviewed_code_files: ['app.js'],
+    reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }],
     items: [{ id: 'unit', state: 'passed' }],
   })
   assert.equal(result.pass, true, `precondition: the attestation must complete the repository: ${result.problems.join(' | ')}`)
@@ -267,6 +267,24 @@ test('the message lists a claimed code file that is not reviewed and the missing
   assert.match(next, /review each changed code file you claim/, 'the next step must say to review the claimed code files')
   assert.match(next, /check each changed document you did not reject/, 'the next step must say to check the unrejected documents')
   assert.match(next, /honestly attest/, 'the next step must say to attest honestly')
+  assert.match(next, /demonstrate the change in real use/, 'the next step must say to demonstrate the change, because a review is only a reading')
+  assert.match(next, /demonstrated_files naming each path/, 'the next step must name the field that records the run')
+})
+
+test('the message lists reviewed files that were never demonstrated and says a review is not a run', async () => {
+  const repo = changedRepo('demonstration-nag')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent)
+  announce(svc, agent, { cwd: repo, files: ['app.js'] })
+  const reviewed = await svc.attest(agent, { repository_root: repo, claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'] })
+  assert.equal(reviewed.pass, false, 'precondition: a reviewed file with no run keeps the repository open')
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 1)
+  const lines = steerText(agent.steers[0]).split('\n')
+  const at = lines.indexOf('Reviewed as a reading but not demonstrated yet (a review is not a run; exercise the change where it is used):')
+  assert.ok(at >= 0, `the message must name the reviewed but undemonstrated files: ${lines.join('\n')}`)
+  assert.equal(lines[at + 1], `- ${path.join(repo, 'app.js')}`, 'the reviewed file must be listed under that heading')
 })
 
 test('an item marked unrelated to the session is omitted from the message', async () => {
@@ -280,7 +298,7 @@ test('an item marked unrelated to the session is omitted from the message', asyn
   const result = await svc.attest(agent, {
     repository_root: repo,
     claims: [{ path: 'app.js', decision: 'mine' }],
-    reviewed_code_files: ['app.js'],
+    reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }],
     items: [{ id: 'unit', state: 'passed' }, { id: 'browser', state: 'unrelated' }],
   })
   assert.equal(result.pass, false, 'precondition: other.js is unclaimed, so the repository stays open')
@@ -302,7 +320,7 @@ test('a repository whose items are all unrelated contributes nothing to the mess
   const result = await svc.attest(agent, {
     repository_root: repo,
     claims: [{ path: 'app.js', decision: 'mine' }],
-    reviewed_code_files: ['app.js'],
+    reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }],
     items: [{ id: 'unit', state: 'unrelated' }, { id: 'browser', state: 'unrelated' }],
   })
   assert.equal(result.pass, true, `precondition: nothing else is unfinished: ${result.problems.join(' | ')}`)
@@ -322,7 +340,7 @@ test('with no item marked unrelated the message lists every item with its state'
   await svc.attest(agent, {
     repository_root: repo,
     claims: [{ path: 'app.js', decision: 'mine' }],
-    reviewed_code_files: ['app.js'],
+    reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }],
     items: [{ id: 'unit', state: 'passed' }, { id: 'browser', state: 'assumed', reason: 'no display is attached' }],
   })
   await stop(svc, agent)
@@ -385,7 +403,7 @@ test('a repository changed after its attestation says its attestation is stale',
   const result = await svc.attest(agent, {
     repository_root: repo,
     claims: [{ path: 'app.js', decision: 'mine' }],
-    reviewed_code_files: ['app.js'],
+    reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }],
     items: [{ id: 'unit', state: 'passed' }],
   })
   assert.equal(result.pass, true, `precondition: the attestation must complete the repository: ${result.problems.join(' | ')}`)
@@ -575,7 +593,7 @@ test('a changed file whose added lines could not be read is named even when no c
   const result = await svc.attest(agent, {
     repository_root: repo,
     claims: [{ path: 'app.js', decision: 'mine' }],
-    reviewed_code_files: ['app.js'],
+    reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }],
     items: [{ id: 'unit', state: 'passed' }],
   })
   assert.equal(result.pass, true, `precondition: the repository must be complete: ${result.problems.join(' | ')}`)
@@ -599,7 +617,7 @@ test('with the credential scan off, an unread file sends nothing when the reposi
   const result = await svc.attest(agent, {
     repository_root: repo,
     claims: [{ path: 'app.js', decision: 'mine' }],
-    reviewed_code_files: ['app.js'],
+    reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }],
     items: [{ id: 'unit', state: 'passed' }],
   })
   assert.equal(result.pass, true, `precondition: the repository must be complete: ${result.problems.join(' | ')}`)
@@ -625,7 +643,7 @@ test('an attested nested repository whose HEAD becomes unreadable on a later sto
   const result = await svc.attest(agent, {
     repository_root: child,
     claims: [{ path: '.', decision: 'mine' }],
-    reviewed_code_files: ['.'],
+    reviewed_code_files: ['.'], demonstrated_files: [{ path: '.', note: 'ran the fixture' }],
     items: [{ id: 'unit', state: 'passed' }],
   })
   assert.equal(result.pass, true, `precondition: the nested repository must be complete: ${result.problems.join(' | ')}`)
@@ -658,7 +676,7 @@ for (const kind of ['binary', 'oversized']) {
     const result = await svc.attest(agent, {
       repository_root: repo,
       claims: [{ path: 'app.js', decision: 'mine' }],
-      reviewed_code_files: ['app.js'],
+      reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }],
       items: [{ id: 'unit', state: 'passed' }],
     })
     assert.equal(result.pass, true, `precondition: the repository must be complete: ${result.problems.join(' | ')}`)
@@ -1004,7 +1022,7 @@ test('a silent stop carries an unread-file notice the next prompt cannot read ag
   // The repository is complete now. The host drops turn 3's saved diffs, so the report re-reads that turn cleanly and
   // the only way the unread file can be named again is the copy the bound kept.
   changes.diffs.clear()
-  await svc.attest(agent, { repository_root: repo, claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'], items: [{ id: 'unit', state: 'passed' }] })
+  await svc.attest(agent, { repository_root: repo, claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }], items: [{ id: 'unit', state: 'passed' }] })
   announce(svc, agent, { turn: 3, cwd: repo, files: ['app.js'] })
   await stop(svc, agent, 3)
   assert.equal(agent.steers.length, 1, 'a stop over an attested, unchanged set must stay silent')

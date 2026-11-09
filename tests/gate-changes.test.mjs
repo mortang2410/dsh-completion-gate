@@ -200,7 +200,7 @@ test('a turn keeps its attestation across repeated stops while its files and con
     }
     writeUnitCatalog(repo)
     const attestation = {
-      action: 'attest', repository_root: repo, claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'],
+      action: 'attest', repository_root: repo, claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }],
       items: [{ id: 'unit', state: 'passed' }], summary: 'Reviewed app.js.',
     }
 
@@ -249,7 +249,7 @@ test('a moved nested repository pointer changes the attestation identity and an 
     announce(svc, 'session-1', 5, 60, [file('nested')], repo)
     writeUnitCatalog(child)
     const attested = await svc.attest(agent, {
-      action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'],
+      action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'], demonstrated_files: [{ path: '.', note: 'ran the fixture' }],
       items: [{ id: 'unit', state: 'passed' }], summary: 'Reviewed the nested repository pointer.',
     })
     assert.equal(attested.pass, true, `attest failed: ${JSON.stringify(attested.blockers)}`)
@@ -440,7 +440,7 @@ test('an unreadable nested HEAD is reported at the stop, and the attestation hol
     writeUnitCatalog(child)
     announce(svc, 'session-1', 1, 60, [file('nested')], repo)
     const attested = await svc.attest(agent, {
-      action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'],
+      action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'], demonstrated_files: [{ path: '.', note: 'ran the fixture' }],
       items: [{ id: 'unit', state: 'passed' }], summary: 'Reviewed the nested repository pointer.',
     })
     assert.equal(attested.pass, true, `attest failed: ${JSON.stringify(attested.blockers)}`)
@@ -494,7 +494,7 @@ test('an attest during a first nested HEAD read failure binds nothing, and one a
   try {
     const agent = agentFor(repo)
     const attestation = {
-      action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'],
+      action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'], demonstrated_files: [{ path: '.', note: 'ran the fixture' }],
       items: [{ id: 'unit', state: 'passed' }], summary: 'Reviewed the nested repository pointer.',
     }
 
@@ -567,7 +567,7 @@ test('a moved nested pointer under a path containing a newline changes the attes
     writeUnitCatalog(child)
     announce(svc, 'session-1', 6, 70, [file(listed)], repo)
     const attested = await svc.attest(agent, {
-      action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'],
+      action: 'attest', repository_root: child, claims: [{ path: '.', decision: 'mine' }], reviewed_code_files: ['.'], demonstrated_files: [{ path: '.', note: 'ran the fixture' }],
       items: [{ id: 'unit', state: 'passed' }], summary: 'Reviewed the nested repository pointer.',
     })
     assert.equal(attested.pass, true, `attest failed: ${JSON.stringify(attested.blockers)}`)

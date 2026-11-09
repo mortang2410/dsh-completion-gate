@@ -6,7 +6,7 @@ const root = new URL('../', import.meta.url)
 
 test('source release is dependency-free and complete', () => {
   const pkg = JSON.parse(fs.readFileSync(new URL('package.json', root), 'utf8'))
-  assert.equal(pkg.version, '0.2.0')
+  assert.equal(pkg.version, '0.3.0')
   assert.deepEqual(pkg.dependencies ?? {}, {})
   for (const file of ['lib/index.js', 'lib/core.js', 'lib/settings.js', 'lib/client.js', 'lib/changes.js', 'lib/report.js', 'lib/repositories.js', 'lib/tracker.js', 'lib/catalog.js', 'cordis.patch.yml']) {
     assert.equal(fs.existsSync(new URL(file, root)), true, `missing released file: ${file}`)

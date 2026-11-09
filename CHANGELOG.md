@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0
+
+Demonstration is the state above review. A review is a reading, so the gate no longer treats a read file as finished.
+
+- Add the per-file demonstrated state. A claimed file, documentation included, must be demonstrated in real use after it is reviewed, and the report prints the file as "reviewed and demonstrated" with the note of the run beside it.
+- Add the `demonstrated_files` attest argument, one `{path, note}` entry per file. A note says what was run, where it ran, and what it showed, and an empty note refuses the whole attest.
+- A demonstration counts only for a file the same attestation covers as reviewed. A demonstration of code nobody read is not evidence about the code a reviewer read.
+- Name reviewed but undemonstrated files as a problem in the status report, and list them in the advisory under their own heading, because a review is not a run.
+- Clear the demonstrated state on a reopen along with the claims and reviews, and from a later attest that does not repeat it.
+- Print a dropped attestation as `stale` in the status report, the same word the panel already used, instead of `missing`.
+- Show the demonstrated state in the panel.
+- Bump the package version to 0.3.0.
+
 ## 0.2.0
 
 Advisory multi-repository completion tracker. The gate no longer runs verification. It attributes changed files to the repositories that own them, records the model's claims, and reminds the model once per user prompt.

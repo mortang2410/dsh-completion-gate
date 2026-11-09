@@ -202,7 +202,7 @@ test('the control-center panel renders the six surviving settings and no retired
   assert.equal(countClass(tree, 'cg-field'), 6, 'the panel has exactly six setting controls')
 })
 
-test('the panel renders a session row, a repository block, and each changed file claim and reviewed state', () => {
+test('the panel renders a session row, a repository block, and each changed file claim, reviewed and demonstrated state', () => {
   const half = loadClientHalf()
   const state = {
     pending: 1,
@@ -216,7 +216,7 @@ test('the panel renders a session row, a repository block, and each changed file
           claimCounts: { mine: 1, notMine: 0, unclaimed: 1 },
           items: [{ id: 'unit', name: 'Unit', state: 'passed' }],
           files: [
-            { path: 'src/app.js', claim: 'mine', reviewed: true, documentation: false },
+            { path: 'src/app.js', claim: 'mine', reviewed: true, demonstrated: 'ran the build and loaded the page', documentation: false },
             { path: 'NOTES.md', claim: 'unclaimed', reviewed: false, documentation: true },
           ],
         },
@@ -243,9 +243,9 @@ test('the panel renders a session row, a repository block, and each changed file
   for (const marker of [
     'session-1', '1 pending repository',
     'alpha', 'Attestation: missing', '1 mine · 0 rejected · 1 unclaimed · pending',
-    'src/app.js - mine - reviewed', 'NOTES.md - unclaimed - unreviewed', 'unit: Unit - passed',
+    'src/app.js - mine - reviewed and demonstrated: ran the build and loaded the page', 'NOTES.md - unclaimed - unreviewed', 'unit: Unit - passed',
     'beta', 'Attestation: current', '0 mine · 1 rejected · 0 unclaimed · complete',
-    'lib/beta.js - not-mine - unreviewed',
+    'lib/beta.js - not-mine - rejected, so no review or demonstration is owed',
     'e2e: E2E - assumed, not run: needs a database', 'old: Old - unrelated to this session',
     'gamma', 'Attestation: stale', 'No changed file.',
   ]) {

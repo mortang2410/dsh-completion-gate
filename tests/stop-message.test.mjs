@@ -92,8 +92,10 @@ function begin(svc, agent, turn = TURN) {
   svc.publish(agent, 'user/message', userMessage(agent.id, turn))
 }
 
-// Announces one turn's change record the way the host does: the event, then the summary it serves for that sequence.
+// Announces one turn's change record the way the host does: first the root session's own file-tool calls for each path
+// (the session wrote every listed file with its `write` tool), then the event and the summary it serves for that sequence.
 function announce(svc, agent, { turn = TURN, cwd, files, total = files.length, diffs = null }) {
+  for (const file of files) svc.publish(agent, 'tool/call', { turn, name: 'write', arguments: JSON.stringify({ file_path: file, content: 'x\n' }) })
   const seq = svc.publish(agent, 'workspace/changes', { turn })
   svc.changeService().diffs.delete(`${agent.id}:${seq}`)
   svc.changeService().entries.set(`${agent.id}:${seq}`, {

@@ -69,9 +69,13 @@ function userPrompt(svc, sessionId, turn) {
   svc.publish({ id: sessionId }, 'user/message', userMessage(sessionId, turn))
 }
 
+// The root session wrote every listed path with its own `write` tool, so the recorder's paths are its obligation.
 function announce(svc, sessionId, turn, seq, files) {
   svc.changes.observe({ id: sessionId }, { type: 'turn/start', data: { turn } })
   userPrompt(svc, sessionId, turn)
+  for (const file of files) {
+    svc.changes.observe({ id: sessionId }, { type: 'tool/call', data: { turn, name: 'write', arguments: JSON.stringify({ file_path: file.path, content: 'x\n' }) } })
+  }
   svc.changes.observe({ id: sessionId }, { type: 'workspace/changes', seq, data: { turn } })
   svc.changeService().entries.set(`${sessionId}:${seq}`, {
     turn, cwd: '/repo', files, total: files.length, added: files.length, deleted: 0,

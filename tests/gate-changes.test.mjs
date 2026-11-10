@@ -77,11 +77,21 @@ function userPrompt(svc, sessionId, turn) {
   svc.publish(sessionId, 'user/message', userMessage(sessionId, turn))
 }
 
+// One root-session file-tool call, as the host records it: the tool name and its arguments as the raw JSON string the
+// session event carries. The gate reads the path from this call, never from the recorder's file list.
+function fileToolCall(svc, sessionId, turn, name, args) {
+  svc.publish(sessionId, 'tool/call', { turn, name, arguments: JSON.stringify(args) })
+}
+
 // Announce one `workspace/changes` event the way the host recorder does, and register the
 // summary the service will serve for that sequence. `cwd` is the directory the recorder reports its paths against.
-function announce(svc, sessionId, turn, seq, files, cwd) {
+// `calls` names the paths the root session's own file tools wrote this turn, and defaults to every listed path: a
+// turn the session edited directly. An empty list announces the same change record for a turn no file tool named,
+// which is a shell command or another writer's change.
+function announce(svc, sessionId, turn, seq, files, cwd, { calls = files.map(entry => entry.path) } = {}) {
   svc.changes.observe({ id: sessionId }, { type: 'turn/start', data: { turn } })
   userPrompt(svc, sessionId, turn)
+  for (const file of calls) fileToolCall(svc, sessionId, turn, 'write', { file_path: file, content: 'x\n' })
   svc.changes.observe({ id: sessionId }, { type: 'workspace/changes', seq, data: { turn } })
   svc.changeService().entries.set(`${sessionId}:${seq}`, {
     turn, cwd, files, total: files.length, added: files.length, deleted: 0,
@@ -130,6 +140,71 @@ test('a turn the recorder reported changes for is attributed to the session', as
       [{ root: repo, files: [path.join(repo, 'src', 'feature.js')] }],
     )
     assert.deepEqual(changes.announced, [305], 'the summary must be read by the event sequence, not the turn number')
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
+// The intersection, from the other side: the recorder lists a file a shell command changed, and no root-session file
+// tool named it, so it is not this session's obligation.
+test('a turn whose only change is a shell command tracks no file', async t => {
+  const repo = tempRepo(t)
+  const svc = service()
+  try {
+    const agent = agentFor(repo)
+    announce(svc, 'session-1', 2, 200, [file('src/from-shell.js')], repo, { calls: [] })
+    await svc.stopping({ agent, turn: 2 })
+    assert.equal(agent.steers.length, 0, 'a shell-command change is not the session\'s, so the stop has nothing to say')
+    const report = await svc.repositoryReport(agent)
+    assert.deepEqual(report.repositories, [], 'the shell-command file must not be tracked')
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
+// Another writer's change on a different path, with no root-session file-tool call naming it. The root session wrote its
+// own path this turn, so a turn that tracked every listed path would blame this one for the other writer's file.
+test('a path another writer changed, which no file-tool call names, is not tracked', async t => {
+  const repo = tempRepo(t)
+  const svc = service()
+  try {
+    const agent = agentFor(repo)
+    announce(svc, 'session-1', 2, 210, [file('src/theirs.js')], repo, { calls: ['src/mine.js'] })
+    const report = await svc.repositoryReport(agent)
+    assert.deepEqual(report.repositories, [], 'a different-path other-writer change must not be tracked')
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
+// The guarantee is path overlap, not authorship: the recorder summary carries no author, so a path a root-session file
+// tool named is tracked even when another writer changed the same path in the same turn.
+test('a same-path change by another writer is tracked, because the guarantee is path overlap', async t => {
+  const repo = tempRepo(t)
+  const svc = service()
+  try {
+    const agent = agentFor(repo)
+    announce(svc, 'session-1', 2, 220, [file('src/shared.js')], repo, { calls: ['src/shared.js'] })
+    const report = await svc.repositoryReport(agent)
+    assert.deepEqual(
+      report.repositories.map(repository => ({ root: repository.root, files: repository.files.map(item => item.path) })),
+      [{ root: repo, files: ['src/shared.js'] }],
+      'the path both the recorder and the file-tool call name is tracked',
+    )
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
+// The host canonicalizes each file-tool path through its longest existing ancestor before it lists the file, so a write
+// through a relative symlink to a file that does not exist yet must compare equal to the recorder's path for it.
+test('a relative symlink path with a missing leaf canonicalizes to the path the recorder lists', async t => {
+  const repo = tempRepo(t)
+  fs.mkdirSync(path.join(repo, 'target'))
+  fs.symlinkSync('target', path.join(repo, 'link'))
+  const svc = service()
+  try {
+    const agent = agentFor(repo)
+    // The recorder lists the canonical path of the new file; the session's own write names the symlinked one.
+    announce(svc, 'session-1', 2, 230, [file('target/new.js')], repo, { calls: ['link/new.js'] })
+    const report = await svc.repositoryReport(agent)
+    assert.deepEqual(
+      report.repositories.map(repository => ({ root: repository.root, files: repository.files.map(item => item.absolute) })),
+      [{ root: repo, files: [path.join(repo, 'target', 'new.js')] }],
+      'the symlinked tool path and the recorder path name one file',
+    )
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
@@ -195,6 +270,7 @@ test('a turn keeps its attestation across repeated stops while its files and con
     svc.changes.observe({ id: 'session-1' }, { type: 'turn/start', data: { turn: 3 } })
     userPrompt(svc, 'session-1', 3)
     const publish = seq => {
+      fileToolCall(svc, 'session-1', 3, 'write', { file_path: 'app.js', content: 'const value = 2\n' })
       svc.changes.observe({ id: 'session-1' }, { type: 'workspace/changes', seq, data: { turn: 3 } })
       svc.changeService().entries.set(`session-1:${seq}`, { turn: 3, cwd: repo, files: [file('app.js')], total: 1, added: 1, deleted: 0 })
     }

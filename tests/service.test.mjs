@@ -273,7 +273,35 @@ function tempGitRepo(t){const dir=makeWorkDir('status-');t.after(()=>fs.rmSync(d
 function statusService(summaries,config={}){const listeners=new Map();const tools={};const commands={};const off=()=>()=>{};const reflect=summaries?{get:name=>name==='workspaceChanges'?{summary:(id,seq)=>summaries.get(`${id}:${seq}`)}:undefined}:{get:()=>undefined};const host={reflect,on:(name,listener)=>{listeners.set(name,listener);return off()},provide:off,tools:{register:definition=>{tools.completion_gate=definition;return off()}},commands:{register:definition=>{commands[definition.name]=definition;return off()}},systemPrompt:{section:off},webServer:{register:off}};const svc=service(host,config,workRoot);svc.__listeners=listeners;svc.start();svc.__tool=tools.completion_gate;svc.__commands=commands;return svc}
 // One turn as the host publishes it: the turn starts, then its change record is announced under a sequence number that keys the summary.
 function userPrompt(svc,a,turn){emit(svc,a,'user/message',userMessage(a.id,turn))}
-function announceTurn(svc,a,summaries,turn,cwd,paths){emit(svc,a,'turn/start',{turn});userPrompt(svc,a,turn);const seq=published+1;summaries.set(`${a.id}:${seq}`,{turn,cwd,files:paths.map(p=>({path:p,display:p,added:1,deleted:0})),total:paths.length,added:paths.length,deleted:0});emit(svc,a,'workspace/changes',{turn});return seq}
+// One root-session file-tool call, as the host records it: a tool name and its arguments as the raw JSON string.
+function fileToolCall(svc,a,turn,file){emit(svc,a,'tool/call',{turn,name:'write',arguments:JSON.stringify({file_path:file,content:'x\n'})})}
+// The root session wrote every listed path with its own `write` tool. A fixture for another writer's or a shell command's
+// change announces the record without these calls.
+function announceTurn(svc,a,summaries,turn,cwd,paths){emit(svc,a,'turn/start',{turn});userPrompt(svc,a,turn);for(const file of paths)fileToolCall(svc,a,turn,file);const seq=published+1;summaries.set(`${a.id}:${seq}`,{turn,cwd,files:paths.map(p=>({path:p,display:p,added:1,deleted:0})),total:paths.length,added:paths.length,deleted:0});emit(svc,a,'workspace/changes',{turn});return seq}
+
+// C6: the report passes the turn's own file-tool paths to the tracker, so only a recorder path the root session wrote is
+// filed. A turn whose path was changed by a shell command files nothing; the same path filed after a write is tracked.
+test('a shell-command-only turn files no repository, and a turn the session wrote files it', async t => {
+  const session = tempGitRepo(t)
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent([], { cwd: session })
+  const announceOnly = (turn, seq) => {
+    const summary = { turn, cwd: session, files: [{ path: 'app.js', display: 'app.js', added: 1, deleted: 0 }], total: 1, added: 1, deleted: 0 }
+    summaries.set(`${a.id}:${seq}`, summary)
+    emit(svc, a, 'workspace/changes', { turn })
+  }
+  emit(svc, a, 'turn/start', { turn: 1 })
+  announceOnly(1, published + 1)
+  assert.deepEqual((await svc.repositoryReport(a)).repositories, [], 'no file-tool call named the shell-changed path')
+
+  emit(svc, a, 'turn/start', { turn: 2 })
+  fileToolCall(svc, a, 2, 'app.js')
+  announceOnly(2, published + 1)
+  const report = await svc.repositoryReport(a)
+  assert.deepEqual(report.repositories.map(repo => repo.files.map(file => file.absolute)), [[path.join(session, 'app.js')]], 'the path the write tool named is tracked')
+})
 
 // A session working in a subdirectory of a repository files a file outside every repository under that working directory,
 // which is no git root. Attesting the root the status prints must claim that file, not resolve it to the repository above.

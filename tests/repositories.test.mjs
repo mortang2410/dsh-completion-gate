@@ -42,6 +42,12 @@ function nestedState() {
   return { heads: new Map(), unreadable: [], unresolved: [] }
 }
 
+// The turn's own file-tool paths, as the host's `write` call names them: absolute paths resolved against the base the
+// recorder reports its paths from. merge files a recorder path only when this set contains it (tracker.js fileTurn).
+function named(base, ...files) {
+  return files.map(file => path.resolve(base, file))
+}
+
 // Every lstat of a `.git` entry fails with EIO while `state.on` is true, the way an unreadable repository does.
 function failGitLookups(t) {
   const real = fs.promises.lstat
@@ -163,7 +169,7 @@ test('the owning repository follows the durable path, never the display string',
   tracker.observe({ id: 's1' }, { type: 'workspace/changes', seq: 3, data: { turn: 1 } })
   const record = readTurnChanges({ service, tracker, sessionId: 's1', turn: 1 })
   const repos = new RepositoryTracker()
-  await repos.merge('s1', { turn: 1, seq: record.seq, base: record.base, files: record.files, fallback: session })
+  await repos.merge('s1', { turn: 1, seq: record.seq, base: record.base, files: record.files, fileToolPaths: named(session, 'app.js'), fallback: session })
   const listed = repos.repositories('s1')
   assert.equal(listed.length, 1)
   assert.equal(listed[0].root, session)
@@ -173,8 +179,8 @@ test('the owning repository follows the durable path, never the display string',
 test('merging the same turn and sequence again changes nothing', async t => {
   const repo = tempRepo(t)
   const repos = new RepositoryTracker()
-  assert.equal(await repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js'], fallback: repo }), true)
-  assert.equal(await repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js', 'other.js'], fallback: repo }), false)
+  assert.equal(await repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js'], fileToolPaths: named(repo, 'app.js'), fallback: repo }), true)
+  assert.equal(await repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js', 'other.js'], fileToolPaths: named(repo, 'app.js'), fallback: repo }), false)
   const listed = repos.repositories('s1')
   assert.equal(listed.length, 1)
   assert.equal(listed[0].files.length, 1)
@@ -183,13 +189,13 @@ test('merging the same turn and sequence again changes nothing', async t => {
 test('two turns that touch the same file keep one entry and refresh its content key', async t => {
   const repo = tempRepo(t)
   const repos = new RepositoryTracker()
-  await repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js'], fallback: repo })
+  await repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js'], fileToolPaths: named(repo, 'app.js'), fallback: repo })
   await repos.refresh('s1', nestedState())
   assert.equal(repos.repositories('s1').length, 1, 'the first turn must create the repository')
   const first = repos.repositories('s1')[0].files[0].key
 
   fs.writeFileSync(path.join(repo, 'app.js'), 'const value = 2\n')
-  await repos.merge('s1', { turn: 2, seq: 11, base: repo, files: ['app.js'], fallback: repo })
+  await repos.merge('s1', { turn: 2, seq: 11, base: repo, files: ['app.js'], fileToolPaths: named(repo, 'app.js'), fallback: repo })
   await repos.refresh('s1', nestedState())
 
   const listed = repos.repositories('s1')
@@ -205,8 +211,8 @@ test('two turns that touch the same file keep one entry and refresh its content 
 test('each session keeps its own repositories, and forgetting one leaves the other', async t => {
   const repo = tempRepo(t)
   const repos = new RepositoryTracker()
-  await repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js'], fallback: repo })
-  await repos.merge('s2', { turn: 1, seq: 20, base: repo, files: ['app.js'], fallback: repo })
+  await repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js'], fileToolPaths: named(repo, 'app.js'), fallback: repo })
+  await repos.merge('s2', { turn: 1, seq: 20, base: repo, files: ['app.js'], fileToolPaths: named(repo, 'app.js'), fallback: repo })
   assert.equal(repos.repositories('s1').length, 1, 'session s1 must keep its repository')
   assert.equal(repos.repositories('s2').length, 1, 'session s2 must keep its repository')
   assert.equal(repos.repositories('s1')[0].files.length, 1)
@@ -219,7 +225,7 @@ test('each session keeps its own repositories, and forgetting one leaves the oth
 test('the catalog path of each repository is the .dsh/verification.json inside it', async t => {
   const repo = tempRepo(t)
   const repos = new RepositoryTracker()
-  await repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js'], fallback: repo })
+  await repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js'], fileToolPaths: named(repo, 'app.js'), fallback: repo })
   assert.equal(repos.repositories('s1').length, 1, 'the merged file must create its repository')
   assert.equal(repos.repositories('s1')[0].catalogPath, path.join(repo, '.dsh', 'verification.json'))
 })
@@ -235,10 +241,10 @@ test('a merge that cannot read a repository files nothing, and the next evaluati
   const repo = tempRepo(t)
   const repos = new RepositoryTracker()
   const failing = failGitLookups(t)
-  await assert.rejects(repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js'], fallback: repo }), { code: 'EIO' })
+  await assert.rejects(repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js'], fileToolPaths: named(repo, 'app.js'), fallback: repo }), { code: 'EIO' })
   assert.deepEqual(repos.repositories('s1'), [], 'a failed merge must file nothing')
   failing.on = false
-  assert.equal(await repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js'], fallback: repo }), true, 'the failed turn must merge on the retry')
+  assert.equal(await repos.merge('s1', { turn: 1, seq: 10, base: repo, files: ['app.js'], fileToolPaths: named(repo, 'app.js'), fallback: repo }), true, 'the failed turn must merge on the retry')
   assert.equal(repos.repositories('s1')[0].files.length, 1)
 })
 
@@ -248,7 +254,7 @@ test('two merges of one turn that start together both reject when the filing fai
   const repo = tempRepo(t)
   const repos = new RepositoryTracker()
   const lookups = failFirstGitLookup(t)
-  const args = { turn: 1, seq: 10, base: repo, files: ['app.js'], fallback: repo }
+  const args = { turn: 1, seq: 10, base: repo, files: ['app.js'], fileToolPaths: named(repo, 'app.js'), fallback: repo }
   const settled = await Promise.allSettled([repos.merge('s1', args), repos.merge('s1', args)])
   assert.deepEqual(settled.map(s => s.status), ['rejected', 'rejected'], 'a merge that waits on a failed filing must reject')
   assert.equal(lookups.count, 1, 'only the first filing may look the repository up')
@@ -280,7 +286,7 @@ test('a second merge of one turn stays pending until the first filing settles', 
   const repo = tempRepo(t)
   const repos = new RepositoryTracker()
   const gate = holdFirstGitLookup(t)
-  const args = { turn: 1, seq: 10, base: repo, files: ['app.js'], fallback: repo }
+  const args = { turn: 1, seq: 10, base: repo, files: ['app.js'], fileToolPaths: named(repo, 'app.js'), fallback: repo }
   const first = repos.merge('s1', args)
   const second = repos.merge('s1', args)
   let secondSettled = false
@@ -298,7 +304,7 @@ test('a copy staged while a filing is in flight files that turn itself', async t
   const repo = tempRepo(t)
   const repos = new RepositoryTracker()
   const gate = holdFirstGitLookup(t)
-  const args = { turn: 1, seq: 10, base: repo, files: ['app.js'], fallback: repo }
+  const args = { turn: 1, seq: 10, base: repo, files: ['app.js'], fileToolPaths: named(repo, 'app.js'), fallback: repo }
   const first = repos.merge('s1', args)
   const staged = repos.stage('s1')
   gate.release()
@@ -316,10 +322,10 @@ test('a file the nested repository already holds keeps the claim it holds there'
   const file = path.join(nested, 'source.js')
   fs.writeFileSync(file, 'export const value = 1\n')
   const repos = new RepositoryTracker()
-  await repos.merge('s1', { turn: 1, seq: 10, base: outer, files: ['pkg/source.js'], fallback: outer })
+  await repos.merge('s1', { turn: 1, seq: 10, base: outer, files: ['pkg/source.js'], fileToolPaths: named(outer, 'pkg/source.js'), fallback: outer })
   repos.session('s1').repos.get(outer).files.get(file).claim = 'not-mine'
   git(nested, ['init', '-q', '.'])
-  await repos.merge('s1', { turn: 2, seq: 11, base: outer, files: ['pkg/source.js'], fallback: outer })
+  await repos.merge('s1', { turn: 2, seq: 11, base: outer, files: ['pkg/source.js'], fileToolPaths: named(outer, 'pkg/source.js'), fallback: outer })
   repos.session('s1').repos.get(nested).files.get(file).claim = 'mine'
   await repos.reroot('s1', outer)
   assert.deepEqual(repos.repositories('s1').flatMap(repo => repo.files.map(entry => [repo.root, entry.absolute, entry.claim])), [[nested, file, 'mine']])
@@ -332,7 +338,7 @@ test('an emptied source repository that holds an item state is kept', async t =>
   fs.mkdirSync(nested)
   fs.writeFileSync(path.join(nested, 'source.js'), 'export const value = 1\n')
   const repos = new RepositoryTracker()
-  await repos.merge('s1', { turn: 1, seq: 10, base: outer, files: ['pkg/source.js'], fallback: outer })
+  await repos.merge('s1', { turn: 1, seq: 10, base: outer, files: ['pkg/source.js'], fileToolPaths: named(outer, 'pkg/source.js'), fallback: outer })
   repos.session('s1').repos.get(outer).items.set('unit', { state: 'passed' })
   git(nested, ['init', '-q', '.'])
   await repos.reroot('s1', outer)
@@ -346,7 +352,7 @@ test('an emptied source repository that holds an attestation is kept', async t =
   fs.mkdirSync(nested)
   fs.writeFileSync(path.join(nested, 'source.js'), 'export const value = 1\n')
   const repos = new RepositoryTracker()
-  await repos.merge('s1', { turn: 1, seq: 10, base: outer, files: ['pkg/source.js'], fallback: outer })
+  await repos.merge('s1', { turn: 1, seq: 10, base: outer, files: ['pkg/source.js'], fileToolPaths: named(outer, 'pkg/source.js'), fallback: outer })
   repos.applyAttest('s1', outer, { claims: [], items: [], reviewed: [], docsChecked: false }, 'now')
   git(nested, ['init', '-q', '.'])
   await repos.reroot('s1', outer)

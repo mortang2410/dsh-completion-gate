@@ -56,9 +56,11 @@ function emit(svc, a, type, data) {
   svc.__listeners.get('session/event')({ id: a.id }, { type, seq: ++published, time: Date.now(), data })
 }
 
-// One turn as the host publishes it: the turn starts, then its change record is announced under a sequence number.
+// One turn as the host publishes it: the turn starts, then its change record is announced under a sequence number. The
+// root session wrote every listed path with its own `write` tool, so each path is its obligation.
 function announceTurn(svc, a, summaries, turn, cwd, paths) {
   emit(svc, a, 'turn/start', { turn })
+  for (const file of paths) emit(svc, a, 'tool/call', { turn, name: 'write', arguments: JSON.stringify({ file_path: file, content: 'x\n' }) })
   const seq = published + 1
   summaries.set(`${a.id}:${seq}`, { turn, cwd, files: paths.map(p => ({ path: p, display: p, added: 1, deleted: 0 })), total: paths.length, added: paths.length, deleted: 0 })
   emit(svc, a, 'workspace/changes', { turn })
@@ -218,7 +220,8 @@ test('register writes into a symlinked sibling repository, never into the worksp
   const summaries = new Map()
   const svc = gateFor(t, summaries)
   const a = agentIn(session)
-  announceTurn(svc, a, summaries, 1, session, ['vendor/app.js'])
+  // The host reports a file outside the working directory by its canonical absolute path, which is the sibling's path.
+  announceTurn(svc, a, summaries, 1, session, [path.join(sibling, 'app.js')])
   await register(svc, a, 'vendor', [{ name: 'Sibling smoke', proves: 'The sibling starts.' }])
   assert.equal(fs.existsSync(path.join(session, '.dsh')), false, 'the workspace gets no catalog')
   assert.equal(readCatalog(sibling).items[0].id, 'sibling-smoke')
@@ -235,7 +238,8 @@ test('register writes into a sibling subdirectory that a symlink points at, neve
   const summaries = new Map()
   const svc = gateFor(t, summaries)
   const a = agentIn(session)
-  announceTurn(svc, a, summaries, 1, session, ['vendor/app.js'])
+  // The host reports a file outside the working directory by its canonical absolute path, which is the sibling's path.
+  announceTurn(svc, a, summaries, 1, session, [path.join(sibling, 'sub', 'app.js')])
   await register(svc, a, 'vendor', [{ name: 'Sibling smoke', proves: 'The sibling starts.' }])
   assert.equal(fs.existsSync(path.join(session, '.dsh')), false, 'the workspace gets no catalog')
   assert.equal(readCatalog(sibling).items[0].id, 'sibling-smoke')

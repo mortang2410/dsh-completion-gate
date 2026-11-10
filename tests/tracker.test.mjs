@@ -58,9 +58,11 @@ function emit(svc, a, type, data) {
   svc.__listeners.get('session/event')({ id: a.id }, { type, seq: ++published, time: Date.now(), data })
 }
 
-// Announces one turn that changed the given paths, through the same hook the host uses.
+// Announces one turn that changed the given paths, through the same hook the host uses. The session wrote each path with
+// its own `write` tool, so the file-tool call is what makes the recorder's path the session's obligation.
 function announceTurn(svc, a, summaries, turn, cwd, paths) {
   emit(svc, a, 'turn/start', { turn })
+  for (const file of paths) emit(svc, a, 'tool/call', { turn, name: 'write', arguments: JSON.stringify({ file_path: file, content: 'x\n' }) })
   const seq = published + 1
   summaries.set(`${a.id}:${seq}`, { turn, cwd, files: paths.map(p => ({ path: p, display: p, added: 1, deleted: 0 })), total: paths.length, added: paths.length, deleted: 0 })
   emit(svc, a, 'workspace/changes', { turn })
@@ -88,6 +90,71 @@ function problemsOf(lines) {
   }
   return out
 }
+
+// The file-tool paths are read from the root session's own `tool/call` events, by the host recorder's predicates. One
+// turn writes one file with each of the three file tools the host maps to a path, and each of them is tracked. A fourth
+// file the recorder lists, which no call names, stays out: the same turn pins both sides of the intersection.
+test('a write, an edit, and a str_replace_editor call each track the path they name', async t => {
+  const session = attestRepo()
+  const named = ['written.js', 'edited.js', 'created.js']
+  const listed = [...named, 'untouched.js']
+  for (const name of listed) fs.writeFileSync(path.join(session, name), 'x\n')
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent({ cwd: session })
+  emit(svc, a, 'turn/start', { turn: 1 })
+  emit(svc, a, 'tool/call', { turn: 1, name: 'write', arguments: JSON.stringify({ file_path: 'written.js', content: 'x\n' }) })
+  emit(svc, a, 'tool/call', { turn: 1, name: 'edit', arguments: JSON.stringify({ file_path: 'edited.js', old_string: 'a', new_string: 'b' }) })
+  emit(svc, a, 'tool/call', { turn: 1, name: 'str_replace_editor', arguments: JSON.stringify({ command: 'create', path: 'created.js', file_text: 'x\n' }) })
+  const seq = published + 1
+  summaries.set(`${a.id}:${seq}`, { turn: 1, cwd: session, files: listed.map(name => ({ path: name, display: name, added: 1, deleted: 0 })), total: listed.length, added: listed.length, deleted: 0 })
+  emit(svc, a, 'workspace/changes', { turn: 1 })
+  const report = await svc.repositoryReport(a)
+  assert.deepEqual(report.repositories.map(repo => repo.files.map(file => file.absolute)), [named.map(name => path.join(session, name)).sort()])
+})
+
+// The same turn, with every other tool call shape the host refuses to map to a path: a malformed argument string, a
+// file tool missing a required argument, the editor's read command, and two tools that mutate nothing by path.
+test('a malformed, incomplete, or unrecognized file-tool call names no path', async t => {
+  const session = attestRepo()
+  const names = ['a.js', 'b.js', 'c.js', 'd.js', 'e.js', 'f.js']
+  for (const name of names) fs.writeFileSync(path.join(session, name), 'x\n')
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent({ cwd: session })
+  emit(svc, a, 'turn/start', { turn: 1 })
+  emit(svc, a, 'tool/call', { turn: 1, name: 'write', arguments: '{ not json' })
+  emit(svc, a, 'tool/call', { turn: 1, name: 'write', arguments: JSON.stringify({ file_path: 'b.js' }) })
+  emit(svc, a, 'tool/call', { turn: 1, name: 'edit', arguments: JSON.stringify({ file_path: 'c.js', old_string: 'x' }) })
+  emit(svc, a, 'tool/call', { turn: 1, name: 'str_replace_editor', arguments: JSON.stringify({ command: 'view', path: 'd.js' }) })
+  emit(svc, a, 'tool/call', { turn: 1, name: 'bash', arguments: JSON.stringify({ file_path: 'e.js', content: 'x\n' }) })
+  emit(svc, a, 'tool/call', { turn: 1, name: 'subagent', arguments: JSON.stringify({ file_path: 'f.js', content: 'x\n' }) })
+  const seq = published + 1
+  summaries.set(`${a.id}:${seq}`, { turn: 1, cwd: session, files: names.map(name => ({ path: name, display: name, added: 1, deleted: 0 })), total: names.length, added: names.length, deleted: 0 })
+  emit(svc, a, 'workspace/changes', { turn: 1 })
+  const report = await svc.repositoryReport(a)
+  assert.deepEqual(report.repositories, [], 'no file-tool call named a path, so no recorder path is the session\'s')
+})
+
+// The stored path is the raw model-facing path. It is canonicalized when the turn is read, resolved against the turn's
+// record base and through its longest existing ancestor, so a path written through a relative symlink to a file that
+// does not exist yet compares equal to the path the host recorder lists for that file.
+test('fileToolPaths resolves against the base and canonicalizes a symlinked ancestor with a missing leaf', async t => {
+  const session = attestRepo()
+  fs.mkdirSync(path.join(session, 'target'))
+  fs.symlinkSync('target', path.join(session, 'link'))
+  const svc = statusService(new Map())
+  t.after(() => cleanupService(svc))
+  const a = agent({ cwd: session })
+  emit(svc, a, 'turn/start', { turn: 2 })
+  const call = { turn: 2, name: 'write', arguments: JSON.stringify({ file_path: 'link/new.js', content: 'x\n' }) }
+  emit(svc, a, 'tool/call', call)
+  emit(svc, a, 'tool/call', call)
+  assert.deepEqual(await svc.changes.fileToolPaths(a.id, 2, session), [path.join(session, 'target', 'new.js')], 'one canonical path, without duplicates')
+  assert.deepEqual(await svc.changes.fileToolPaths(a.id, 1, session), [], 'a turn that stored none has no path')
+})
 
 async function attestFixture(t, files = ['app.js']) {
   const session = attestRepo()

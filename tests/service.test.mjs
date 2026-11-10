@@ -161,9 +161,9 @@ test('/state reflects claims, item states, and a stale attestation after a reope
   repo = response.body.sessions[0].repositories[0]
   assert.deepEqual(repo.files.map(file => [file.path, file.claim, file.reviewed]), [['app.js', 'unclaimed', false], ['other.js', 'unclaimed', false]], 'a recorded content change clears every claim and reviewed state')
   assert.deepEqual(repo.claimCounts, { mine: 0, notMine: 0, unclaimed: 2 })
-  // A reopen keeps only the unrelated mark, so the assumed statement is cleared with the attestation it belonged to.
-  assert.deepEqual(repo.items.map(item => [item.id, item.name, item.state]), [['unit', 'Unit', 'unrelated'], ['end-to-end', 'End to end', null]], 'the unrelated mark survives the reopen and the assumed state clears with it')
-  assert.deepEqual(repo.items.map(item => item.reason), [undefined, undefined], 'the cleared item carries no stale reason')
+  // A reopen keeps only the unrelated mark, so the assumed statement becomes unstated history and leaves the panel row.
+  assert.deepEqual(repo.items.map(item => [item.id, item.name, item.state]), [['unit', 'Unit', 'unrelated']], 'the unrelated mark survives the reopen and the cleared assumed state leaves the row')
+  assert.deepEqual(repo.items.map(item => item.reason), [undefined], 'the surviving item carries no stale reason')
   assert.equal(repo.attestation, 'stale')
   assert.equal(response.body.pending, 1)
 })
@@ -670,8 +670,10 @@ test('a valid but incomplete attest is stored and returns its problems', async t
   assert.equal(result.pass, false, result.markdown)
   assert.ok(result.blockers.some(p => p.startsWith('Unclaimed changed files:') && p.includes(path.join(session, 'other.js'))), result.markdown)
   assert.ok(result.blockers.some(p => p.startsWith('Claimed code files not reviewed:') && p.includes(path.join(session, 'app.js'))), result.markdown)
-  assert.ok(result.blockers.includes('Catalog item not stated: unit (Unit).'), result.markdown)
+  assert.ok(!result.blockers.some(p => p.startsWith('Catalog item not stated')), 'an unstated catalog item is history, so it is no blocker')
+  assert.ok(result.markdown.includes('Unstated catalog items: 1 (history; no action required unless adopted).'), result.markdown)
   const lines = await linesOf(svc, a)
+  assert.ok(!lines.includes('- unit: Unit | not stated'), 'the unstated item has no per-item line')
   assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (mine, unreviewed)`), 'the incomplete attest stored its claim')
   assert.ok(lines.includes('Attestation: current'), 'the incomplete attest is stored')
   assert.ok(lines.includes('Status: unfinished'))
@@ -804,8 +806,9 @@ test('an assumed item without a reason is stored as unfinished and named as a pr
   const claim = { claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }] }
   const noReason = await svc.__tool.execute(attestArgs(session, { ...claim, items: [{ id: 'unit', state: 'assumed' }] }), execOf(a))
   assert.equal(noReason.pass, false, noReason.markdown)
-  assert.ok(noReason.blockers.some(p => p.startsWith('unit is marked assumed but has no reason, so it stays unfinished.')), noReason.markdown)
+  assert.equal(noReason.blockers.filter(p => p.startsWith('unit is marked assumed but has no reason, so it stays unfinished.')).length, 1, `the reasonless item is named by exactly one problem: ${noReason.markdown}`)
   const stored = await linesOf(svc, a)
+  assert.equal(stored.filter(line => line.includes('is marked assumed but has no reason')).length, 1, `the reasonless item is named by exactly one problem:\n${stored.join('\n')}`)
   assert.ok(stored.includes(`- ${path.join(session, 'app.js')} (mine, reviewed and demonstrated: ran the fixture)`), 'the claim of the same call is stored')
   assert.ok(stored.includes('- unit: Unit | not stated'), 'the reasonless item is unfinished')
   assert.ok(stored.includes('Status: unfinished'))
@@ -838,7 +841,8 @@ test('changing a recorded file after attestation reopens the repository: claims 
   const lines = await linesOf(svc, a)
   assert.ok(lines.some(line => line.startsWith('Notice: Repository ') && line.includes(`${session} changed after its attestation`)), 'the reopen is named')
   assert.ok(lines.includes(`- ${path.join(session, 'app.js')} (unclaimed, unreviewed)`), 'the claim is reset')
-  assert.ok(lines.includes('- unit: Unit | not stated'), 'the item state is cleared')
+  assert.ok(!lines.includes('- unit: Unit | not stated'), 'the cleared item state is history, so it has no per-item line')
+  assert.ok(lines.includes('Unstated catalog items: 1 (history; no action required unless adopted).'), 'the cleared item is counted as history')
   assert.ok(lines.includes('Attestation: stale'), 'the attestation is dropped, and the report says why in one word')
 })
 
@@ -879,7 +883,7 @@ test('an outer repository whose only changed file moves into a nested repository
   assert.ok(lines.includes(`Notice: Repository ${session} changed after its attestation, so its claims, reviews, demonstrations and item states were cleared and the attestation was dropped.`), 'a reopen with no unrelated mark keeps the wording it always had')
 })
 
-test('an emptied outer repository that still has catalog items keeps its missing attestation as a problem', async t => {
+test('an emptied outer repository with only unstated catalog items is complete', async t => {
   const session = attestRepo()
   const nested = path.join(session, 'pkg')
   fs.mkdirSync(nested)
@@ -899,8 +903,9 @@ test('an emptied outer repository that still has catalog items keeps its missing
   assert.ok(outerAt >= 0, 'the outer repository is listed')
   const next = lines.findIndex((line, i) => i > outerAt && line.startsWith('Root: '))
   const outer = lines.slice(outerAt, next === -1 ? lines.length : next)
-  assert.ok(outer.includes('Status: unfinished'), outer.join('\n'))
-  assert.ok(outer.includes('- No current attestation for this repository.'), 'the catalog item keeps the attestation obligation')
+  assert.ok(outer.includes('Status: complete'), outer.join('\n'))
+  assert.ok(!outer.includes('- No current attestation for this repository.'), 'an unstated item and no changed file owe no attestation')
+  assert.ok(outer.includes('Unstated catalog items: 1 (history; no action required unless adopted).'), 'the cleared item is history')
 })
 
 test('attest starts no check: a package test script that writes a marker leaves no marker behind', async t => {

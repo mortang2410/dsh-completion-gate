@@ -328,8 +328,9 @@ test('a repository whose items are all unrelated contributes nothing to the mess
   assert.equal(agent.steers.length, 0, 'a repository with only unrelated items left must contribute nothing')
 })
 
-// The message when no item is marked unrelated: every item is listed with its state, in catalog order, exactly as before.
-test('with no item marked unrelated the message lists every item with its state', async () => {
+// The message when no item is marked unrelated: the stated items are listed with their states in catalog order, and one
+// summary line names the unstated items as history.
+test('with no item marked unrelated the message lists the stated items and one summary line', async () => {
   const repo = changedRepo('no-unrelated')
   writeCatalog(repo, ['unit', 'browser', 'smoke'])
   fs.writeFileSync(path.join(repo, 'other.js'), 'const other = 1\n')
@@ -345,7 +346,8 @@ test('with no item marked unrelated the message lists every item with its state'
   })
   await stop(svc, agent)
   assert.equal(agent.steers.length, 1)
-  const lines = steerText(agent.steers[0]).split('\n')
+  const text = steerText(agent.steers[0])
+  const lines = text.split('\n')
   const at = lines.indexOf('Verification items:')
   assert.ok(at >= 0, 'precondition: the message lists the verification items')
   const listed = []
@@ -353,8 +355,32 @@ test('with no item marked unrelated the message lists every item with its state'
   assert.deepEqual(listed, [
     '- unit (unit): passed',
     '- browser (browser): assumed, not run. This is a promise, not a pass. Reason: no display is attached',
-    '- smoke (smoke): unfinished, no state reported yet',
   ])
+  assert.equal(lines.filter(line => line === 'Unstated catalog items: 1 (history; no action required unless adopted).').length, 1, `the unstated item is one summary line: ${text}`)
+  assert.ok(!lines.some(line => line.startsWith('- smoke')), 'the unstated item has no per-item line')
+})
+
+// The zero case: when every catalog item is stated, neither output prints the history line.
+test('a message whose every item is stated omits the summary line', async () => {
+  const repo = changedRepo('zero-unstated')
+  writeCatalog(repo, ['unit', 'browser'])
+  fs.writeFileSync(path.join(repo, 'other.js'), 'const other = 1\n')
+  const svc = service()
+  const agent = agentFor(repo)
+  begin(svc, agent)
+  announce(svc, agent, { cwd: repo, files: ['app.js', 'other.js'] })
+  const result = await svc.attest(agent, {
+    repository_root: repo,
+    claims: [{ path: 'app.js', decision: 'mine' }],
+    reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }],
+    items: [{ id: 'unit', state: 'passed' }, { id: 'browser', state: 'assumed', reason: 'no display is attached' }],
+  })
+  assert.equal(result.pass, false, 'precondition: other.js is unclaimed, so the repository stays open')
+  await stop(svc, agent)
+  assert.equal(agent.steers.length, 1)
+  const lines = steerText(agent.steers[0]).split('\n')
+  assert.ok(lines.includes('- unit (unit): passed'), 'the stated item is listed')
+  assert.ok(!lines.some(line => line.startsWith('Unstated catalog items:')), 'every item is stated, so the summary line is omitted')
 })
 
 test('the message says it is advisory, nothing is stopped, and it never says BLOCKED', async () => {
@@ -567,7 +593,8 @@ test('a message for 51 unfinished files names every file, the last one included'
   assert.ok(unclaimed.some(line => line.endsWith('file50.js')), 'the last unclaimed file must be listed')
 })
 
-test('an item with no state reported is unfinished, not described as an unstated state', async () => {
+// An item the session never stated is history: it gets no per-item line, and one summary line names the count.
+test('an unstated item is one summary line, not a per-item state', async () => {
   const repo = changedRepo('unreported-item')
   writeCatalog(repo, ['unit'])
   const svc = service()
@@ -577,8 +604,9 @@ test('an item with no state reported is unfinished, not described as an unstated
   await stop(svc, agent)
   assert.equal(agent.steers.length, 1)
   const text = steerText(agent.steers[0])
-  assert.match(text, /unit \(unit\): unfinished, no state reported yet/, 'an unreported item must read as unfinished')
-  assert.doesNotMatch(text, /no state stated yet/, 'the old wording must be gone')
+  assert.match(text, /^Unstated catalog items: 1 \(history; no action required unless adopted\)\.$/m, 'the unstated item must be counted as history')
+  assert.doesNotMatch(text, /unit \(unit\)/, 'an unstated item must get no per-item line')
+  assert.doesNotMatch(text, /no state reported yet/, 'the old per-item wording must be gone')
 })
 
 test('a changed file whose added lines could not be read is named even when no credential hit exists', async () => {

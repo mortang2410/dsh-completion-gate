@@ -125,10 +125,57 @@ test('status names each unmet obligation in the stated wording', async t => {
   assert.deepEqual(problemsOf(lines), [
     `Unclaimed changed files: ${app}, ${notes}. Claim each as yours, or reject it.`,
     `Changed documentation not checked: ${notes}. Check each for staleness, bloat, and conflicting information, then attest with docs_checked true.`,
-    'Catalog item not stated: unit (Unit).',
     'No current attestation for this repository.',
   ])
+  assert.ok(lines.includes('Unstated catalog items: 1 (history; no action required unless adopted).'), 'an unstated item is one line of history, not a problem')
+  assert.ok(!lines.includes('- unit: Unit | not stated'), 'an unstated item has no per-item line')
   assert.ok(lines.includes('Status: unfinished'))
+})
+
+test('a catalog with one stated item and one unstated item lists the stated item and one summary line', async t => {
+  const { session, svc, a } = await attestFixture(t)
+  await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Audit', proves: 'the audit log is complete' }] }, execOf(a))
+  const attested = await svc.__tool.execute(completeAttest(session), execOf(a))
+  assert.equal(attested.pass, true, attested.markdown)
+  const lines = await linesOf(svc, a)
+  const summary = 'Unstated catalog items: 1 (history; no action required unless adopted).'
+  assert.equal(lines.filter(line => line === summary).length, 1, `the report names the unstated count once:\n${lines.join('\n')}`)
+  const catalogAt = lines.indexOf('Catalog readable, 2 items:')
+  assert.ok(catalogAt >= 0, `the catalog reading list is printed:\n${lines.join('\n')}`)
+  assert.ok(lines.indexOf(summary) < catalogAt, 'the summary line comes before the full catalog reading list')
+  assert.ok(lines.includes('- unit: Unit | Proves: app.js sets value | Command: none'), 'the reading list keeps the stated item and its proves note')
+  assert.ok(lines.includes('- audit: Audit | Proves: the audit log is complete | Command: none'), 'the reading list keeps the unstated item and its proves note')
+  assert.ok(lines.includes('- unit: Unit | passed'), 'the stated item is listed with its state')
+  assert.ok(!lines.includes('- audit: Audit | not stated'), 'the unstated item has no per-item line')
+  assert.ok(!lines.some(line => line.startsWith('- Catalog item not stated')), 'the unstated item adds no problem')
+  assert.ok(lines.includes('Status: complete'), 'the unstated item is not an obligation, so the repository is complete')
+})
+
+test('a repository with no changed files and only unstated items is complete', async t => {
+  const session = attestRepo()
+  const summaries = new Map()
+  const svc = statusService(summaries)
+  t.after(() => cleanupService(svc))
+  const a = agent({ cwd: session })
+  await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Unit', proves: 'app.js sets value' }] }, execOf(a))
+  const lines = await linesOf(svc, a)
+  assert.ok(lines.includes('Unstated catalog items: 1 (history; no action required unless adopted).'), `the unstated item is one history line:\n${lines.join('\n')}`)
+  assert.ok(!lines.includes('- No current attestation for this repository.'), 'a repository with no changed file and no stated item owes no attestation')
+  assert.ok(!lines.includes('- unit: Unit | not stated'), 'the unstated item has no per-item line')
+  assert.ok(lines.includes('Status: complete'))
+})
+
+test('a catalog whose every item is stated omits the summary line and still lists the unrelated mark', async t => {
+  const { session, svc, a } = await attestFixture(t)
+  await svc.__tool.execute({ action: 'register', repository_root: session, items: [{ name: 'Audit', proves: 'the audit log is complete' }] }, execOf(a))
+  const attested = await svc.__tool.execute(attestArgs(session, {
+    claims: [{ path: 'app.js', decision: 'mine' }], reviewed_code_files: ['app.js'], demonstrated_files: [{ path: 'app.js', note: 'ran the fixture' }],
+    items: [{ id: 'unit', state: 'passed' }, { id: 'audit', state: 'unrelated' }],
+  }), execOf(a))
+  assert.equal(attested.pass, true, attested.markdown)
+  const lines = await linesOf(svc, a)
+  assert.ok(!lines.some(line => line.startsWith('Unstated catalog items:')), 'every item is stated, so the summary line is omitted')
+  assert.ok(lines.includes('- audit: Audit | unrelated to this session'), 'the unrelated mark is still listed in the status report')
 })
 
 test('status names a claimed code file that is not reviewed, and an unreadable catalog', async t => {
@@ -277,8 +324,9 @@ test('a reopen keeps the unrelated mark while the passed and assumed states are 
   fs.writeFileSync(path.join(session, 'app.js'), 'const value = 2\n')
   const lines = await linesOf(svc, a)
   assert.ok(lines.includes(`Notice: Repository ${session} changed after its attestation, so its claims, reviews, demonstrations and item states were cleared except the items marked unrelated, and the attestation was dropped.`), 'the reopen notice names the cleared states and the exception it kept')
-  assert.ok(lines.includes('- unit: Unit | not stated'), 'the passed state is cleared by the reopen')
-  assert.ok(lines.includes('- browser: Browser | not stated'), 'the assumed state is cleared by the reopen')
+  assert.ok(!lines.includes('- unit: Unit | not stated'), 'the cleared passed state is history, so it has no per-item line')
+  assert.ok(!lines.includes('- browser: Browser | not stated'), 'the cleared assumed state is history, so it has no per-item line')
+  assert.ok(lines.includes('Unstated catalog items: 2 (history; no action required unless adopted).'), 'the two cleared items are counted as history')
   assert.ok(lines.includes('- audit: Audit | unrelated to this session'), 'the unrelated mark survives the reopen')
   assert.ok(lines.includes('Attestation: stale'), 'the attestation is dropped, and the report says why in one word')
 })

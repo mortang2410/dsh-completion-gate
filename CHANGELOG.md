@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0
+
+Catalog items are adoption-only, and the gate tracks only paths a root-session file tool names.
+
+- An item obligates the session only when the session states it. An unstated item is history: the status report and the advisory print one summary line, `Unstated catalog items: N (history; no action required unless adopted).`, when the count is positive, and omit it at zero. The status report keeps the full catalog reading list after the line.
+- The evaluator no longer reports an unstated item as a problem. A stated item that is assumed without a reason stays unfinished and is named by exactly one problem.
+- The `unrelated` mark stays in the tool contract and the report as an audit note, but the system prompt no longer asks for it.
+- Track a changed path only when the host recorder lists it and a root-session `write`, `edit`, or mutating `str_replace_editor` call names it. A shell-only change, or a path no root-session file-tool call names, is not the session's obligation. The guarantee is path overlap, not authorship: a same-path change by another writer is tracked.
+- Canonicalize the turn's base before resolving a file-tool path, so a session whose working directory is a symlink, or contains `symlink/..`, still overlaps the path the recorder lists.
+- The system prompt says an item the session does not state is history, and keeps the adopt, register, attest, and demonstrate instructions.
+- Bump the package version to 0.4.0.
+
 ## 0.3.0
 
 Demonstration is the state above review. A review is a reading, so the gate no longer treats a read file as finished.

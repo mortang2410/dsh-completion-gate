@@ -71,7 +71,7 @@ test('the system-prompt paragraph carries every instruction spec section 11 name
     'review every changed code file you claim (a separate reviewer subagent is the recommended pattern)',
     'check the changed documentation you have not rejected for staleness, bloat, and conflicting information',
     'Then attest last with completion_gate action=attest',
-    'mark a catalog item unrelated when it does not concern this session, so it is not reported again',
+    'an item the session does not state is history, so adopt only the items that fit this work',
     'The gate runs nothing and believes you',
   ]
   for (const clause of clauses) assert.equal(section.includes(clause), true, `the system prompt paragraph no longer says: ${clause}`)

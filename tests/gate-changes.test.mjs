@@ -208,6 +208,27 @@ test('a relative symlink path with a missing leaf canonicalizes to the path the 
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
+// The recorder stamps its summary with the raw session cwd but reports each inside-workspace path relative to the
+// canonical working directory. A session started in a symlinked directory must therefore file the path its own file
+// tool named, or the recorder's spelling and the tool's canonical spelling never meet and nothing is tracked.
+test('a session whose working directory is a symlink tracks the file it wrote', async t => {
+  const repo = tempRepo(t)
+  const linked = path.join(path.dirname(repo), `${path.basename(repo)}-link`)
+  fs.symlinkSync(repo, linked)
+  const svc = service()
+  try {
+    const agent = agentFor(linked)
+    // The host lists `app.js` against the real directory even though the turn's cwd is the link.
+    announce(svc, 'session-1', 2, 240, [file('app.js')], linked, { calls: ['app.js'] })
+    const report = await svc.repositoryReport(agent)
+    assert.deepEqual(
+      report.repositories.map(repository => ({ root: repository.root, files: repository.files.map(item => item.absolute) })),
+      [{ root: repo, files: [path.join(repo, 'app.js')] }],
+      'the raw cwd resolves to the directory the recorder reports against',
+    )
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
 test('an absent recorder blocks saying changes cannot be determined', async t => {
   const repo = tempRepo(t)
   const svc = service({ workspaceChanges: null })

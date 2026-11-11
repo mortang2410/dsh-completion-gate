@@ -92,11 +92,12 @@ function problemsOf(lines) {
 }
 
 // The file-tool paths are read from the root session's own `tool/call` events, by the host recorder's predicates. One
-// turn writes one file with each of the three file tools the host maps to a path, and each of them is tracked. A fourth
+// turn writes one file with each file-tool shape the host maps to a path, and each of them is tracked: the editor's
+// three mutating commands, `create`, `str_replace` and `insert`, all count, while its read command stays out. A sixth
 // file the recorder lists, which no call names, stays out: the same turn pins both sides of the intersection.
-test('a write, an edit, and a str_replace_editor call each track the path they name', async t => {
+test('a write, an edit, and each mutating str_replace_editor command track the path they name', async t => {
   const session = attestRepo()
-  const named = ['written.js', 'edited.js', 'created.js']
+  const named = ['written.js', 'edited.js', 'created.js', 'replaced.js', 'inserted.js']
   const listed = [...named, 'untouched.js']
   for (const name of listed) fs.writeFileSync(path.join(session, name), 'x\n')
   const summaries = new Map()
@@ -107,6 +108,8 @@ test('a write, an edit, and a str_replace_editor call each track the path they n
   emit(svc, a, 'tool/call', { turn: 1, name: 'write', arguments: JSON.stringify({ file_path: 'written.js', content: 'x\n' }) })
   emit(svc, a, 'tool/call', { turn: 1, name: 'edit', arguments: JSON.stringify({ file_path: 'edited.js', old_string: 'a', new_string: 'b' }) })
   emit(svc, a, 'tool/call', { turn: 1, name: 'str_replace_editor', arguments: JSON.stringify({ command: 'create', path: 'created.js', file_text: 'x\n' }) })
+  emit(svc, a, 'tool/call', { turn: 1, name: 'str_replace_editor', arguments: JSON.stringify({ command: 'str_replace', path: 'replaced.js', old_str: 'a', new_str: 'b' }) })
+  emit(svc, a, 'tool/call', { turn: 1, name: 'str_replace_editor', arguments: JSON.stringify({ command: 'insert', path: 'inserted.js', insert_line: 0, new_str: 'x\n' }) })
   const seq = published + 1
   summaries.set(`${a.id}:${seq}`, { turn: 1, cwd: session, files: listed.map(name => ({ path: name, display: name, added: 1, deleted: 0 })), total: listed.length, added: listed.length, deleted: 0 })
   emit(svc, a, 'workspace/changes', { turn: 1 })

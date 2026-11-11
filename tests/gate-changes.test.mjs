@@ -229,6 +229,33 @@ test('a session whose working directory is a symlink tracks the file it wrote', 
   } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
 })
 
+// A raw working directory can spell the same directory two ways: `link/..` names the parent of the link's target when
+// the host realpaths it first, and the link's own parent when a resolver collapses it lexically. The host records the
+// turn against the real directory, so the session's own file-tool path must resolve against that same directory or the
+// overlap is lost and the file the session wrote is not tracked.
+test('a session whose cwd contains symlink/.. tracks the file it wrote', async t => {
+  const repo = tempRepo(t)
+  const target = path.join(repo, 'target')
+  fs.mkdirSync(path.join(target, 'nested'), { recursive: true })
+  fs.symlinkSync(path.join('target', 'nested'), path.join(repo, 'link'))
+  const cwd = `${path.join(repo, 'link')}${path.sep}..`
+  // Precondition: the two spellings of this cwd name different directories, so a lexical `..` misses the record base.
+  assert.equal(path.resolve(cwd), repo, 'the lexical parent is the repository root')
+  assert.equal(await fs.promises.realpath(cwd), target, 'the real parent is the link target\'s parent')
+  const svc = service()
+  try {
+    const agent = agentFor(cwd)
+    // The recorder reports `app.js` against the real directory; the session's write named it through the raw cwd.
+    announce(svc, 'session-1', 2, 250, [file('app.js')], cwd, { calls: ['app.js'] })
+    const report = await svc.repositoryReport(agent)
+    assert.deepEqual(
+      report.repositories.map(repository => ({ root: repository.root, files: repository.files.map(item => item.absolute) })),
+      [{ root: repo, files: [path.join(target, 'app.js')] }],
+      'the raw cwd canonicalizes before the file-tool path is resolved, so the write overlaps the recorded path',
+    )
+  } finally { fs.rmSync(svc.__testSettingsDir, { recursive: true, force: true }) }
+})
+
 test('an absent recorder blocks saying changes cannot be determined', async t => {
   const repo = tempRepo(t)
   const svc = service({ workspaceChanges: null })

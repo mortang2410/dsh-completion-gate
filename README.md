@@ -1,6 +1,6 @@
 # dsh-completion-gate
 
-Completion Gate is a DeepSeek Harness plugin that tracks every file a session changes, resolves each changed file to the repository that owns it, and sends the model one advisory message per user prompt naming the work still unfinished in each repository. It is a reminder, not a check: it executes no test, build, lint, recipe, or probe, and it believes what the model reports about its own work.
+Completion Gate is a DeepSeek Harness plugin that tracks a changed file when the session's file tools also name it, resolves each tracked file to the repository that owns it, and sends the model one advisory message per user prompt naming the work still unfinished in each repository. It is a reminder, not a check: it executes no test, build, lint, recipe, or probe, and it believes what the model reports about its own work.
 
 The plugin also keeps the Premature Stop Guard, which recovers a natural stop that clearly leaves work pending by scheduling a fresh follow-up turn.
 
@@ -21,7 +21,7 @@ Completion Gate is advisory. It never refuses a write, never blocks a tool call,
 ## Core behavior
 
 1. The gate reads the host's turn-scoped change record. The record comes from `@deepseek-ai/dsh-workspace-changes`, which snapshots the working tree at turn start and turn end and diffs the two snapshots.
-2. The scanner resolves every listed path to the repository that owns it.
+2. The scanner keeps a listed path only when a root-session `write`, `edit`, or mutating `str_replace_editor` call also names it, then resolves that path to the repository that owns it. A shell-only change is not tracked.
 3. The gate merges the result into one ledger per session per repository.
 4. When the model tries to end the turn, the gate speaks at most once for that user prompt. The message lists what each repository still owes. A repository with nothing unfinished contributes nothing.
 
@@ -97,8 +97,8 @@ A catalog that cannot be read is reported and never overwritten. An item is only
 
 - `passed`: the model ran the item and it passed.
 - `assumed`: the model did not run it and gave a reason. The reason is required. The report always shows an assumed item as a promise, not a pass.
-- `unrelated`: the item does not bear on this session's work. It is left out of the advisory message so it does not nag this session again. The mark survives a reopening, and the status report still lists the item.
-- unstated: the item is unfinished. A failed item is simply not marked passed, so it stays unfinished.
+- `unrelated`: the item does not bear on this session's work. It is left out of the advisory message so it does not nag this session again. The mark survives a reopening, and the status report still lists the item. The system prompt no longer asks for this mark; an unstated item is history.
+- unstated: the item is history. It does not obligate the session unless the session adopts it. The advisory summary counts these items as history, and a failed item is simply not marked passed.
 
 ---
 
@@ -134,7 +134,7 @@ Reopening is bounded by the change source. A path the host record omits cannot r
 
 The gate speaks only when the model tries to end a turn, and at most once per user prompt. It takes the first attempt of the prompt that has something to say and stays silent at every later attempt.
 
-The message covers every repository the session has touched that still has unfinished work. A repository appears with its label and root, the changed files grouped by claim, the code files not yet reviewed, the reviewed files not yet demonstrated, the documentation check when it is missing, every catalog item with its state, and whether the attestation is missing, stale, or current. An item marked unrelated is left out. A repository seen for the first time in this session gets one introduction paragraph that names the repository, points at its catalog, and asks the model to register the verification it will run. The introduction appears once.
+The message covers every repository the session has touched that still has unfinished work. A repository appears with its label and root, the changed files grouped by claim, the code files not yet reviewed, the reviewed files not yet demonstrated, the documentation check when it is missing, the catalog items the session stated with their state, and whether the attestation is missing, stale, or current. An item marked unrelated is left out. When unstated items exist, the message lists the stated items and then prints `Unstated catalog items: N (history; no action required unless adopted).`; at zero it omits that line. The advisory has no full catalog list; the status report carries that reading list. A repository seen for the first time in this session gets one introduction paragraph that names the repository, points at its catalog, and asks the model to register the verification it will run. The introduction appears once.
 
 The message is delivered with `agent.steer`, which queues one more model step in the same turn before the turn boundary commits. It never blocks a write or a tool call. After that one steer the gate sends no further message until another real user message arrives.
 
@@ -253,7 +253,7 @@ Gate · off
 
 The recorder is the source of truth, and it has limits the gate cannot fix.
 
-- A session's snapshot covers the repository that holds its working directory. A file in a sibling repository is listed only when a file tool edits it. A shell edit in a sibling repository is never listed.
+- A session's snapshot covers the repository that holds its working directory. A changed path is tracked only when a root-session `write`, `edit`, or mutating `str_replace_editor` call also names it. A shell-only change is not tracked, and a file in a sibling repository is listed only when a file tool edits it.
 - Ignored paths are listed only when a file tool captures them.
 - A path already dirty at turn start is part of the baseline and is not listed.
 - Nested repositories and submodules are listed as their directory path, so their inner files are unseen. A moved HEAD is seen.

@@ -189,7 +189,7 @@ The machine-check keys, the recipe keys, the temporary-verifier key, the command
 
 ### `/gate` and `/gate-status`
 
-Show the session report: every repository this session changed, with each file's claim and reviewed and demonstrated state, the catalog items and their states, the attestation state, and the remaining problems. Neither command starts a check.
+Show the session report: every repository this session changed, with each file's claim and reviewed and demonstrated state, the catalog items and their states, the attestation state, and the remaining problems. When a repository has unstated catalog items, the report prints `Unstated catalog items: N (history; no action required unless adopted).` before the full catalog reading list, and omits that line when the count is zero. Neither command starts a check.
 
 ### `/gate-reset`
 
